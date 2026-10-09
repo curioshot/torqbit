@@ -1,6 +1,7 @@
 """Always-on-top island / corner widget."""
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QRect, QPropertyAnimation, QEasingCurve
@@ -14,6 +15,7 @@ from . import config as cfgmod
 from . import icons as iconsmod
 from . import sensors as sensorsmod
 from . import themes as themesmod
+from .center import ControlCenter
 from .face import FaceView
 from .glass import GlassPanel
 from .service_tab import ServiceTab
@@ -23,6 +25,31 @@ from .tabs import BotTab, CalendarTab, SystemNotesTab, AppearanceTab
 COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H = 252, 42
 COLLAPSED_CORNER = 112
 EXPANDED_W, EXPANDED_H = 368, 540
+CENTRE_GAP = 8          # the visible break between the two containers
+CENTRE_MIN_W = 900
+CENTRE_W = 1120         # preferred width of the control-centre panel
+CENTRE_H = 300          # fixed height; the feed list scrolls inside
+CENTRE_MIN_H = 190
+
+
+def _qt_color(value) -> str:
+    """Theme colours are CSS strings like 'rgba(13, 13, 16, 246)'.
+
+    QColor cannot parse that spelling — it rejects it and every painted
+    widget then falls back to its (near-white) ink colour. Normalise to hex
+    here so the painted widgets always get a colour Qt understands.
+    """
+    import re
+    if not isinstance(value, str):
+        return "#000000"
+    s = value.strip()
+    m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)"
+                 r"(?:\s*,\s*([\d.]+))?\s*\)", s, re.I)
+    if m:
+        r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+        r, g, b = (max(0, min(255, v)) for v in (r, g, b))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return s if s.startswith("#") else "#000000"
 
 
 class IslandWindow(QWidget):
@@ -30,11 +57,13 @@ class IslandWindow(QWidget):
         super().__init__()
         self.cfg = cfgmod.load()
         self.expanded = False
+        self.centre_open = False
         self._dragging = False
         self._press_pos = QPoint()
         self._press_global = QPoint()
         self._moved = False
         self._target_geom = None  # enforced end-state for expand/collapse flights
+        self._last_click = 0.0    # for click -> card vs double-click -> centre
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
@@ -153,11 +182,26 @@ class IslandWindow(QWidget):
         cv_content.addWidget(self.tabs)
         cv.addWidget(self.content, 1)
 
-        self.hint = QLabel("Right-click: island ⇄ corner • face • theme • quit   •   Drag to move")
+        self.hint = QLabel("Click: island · Double-click: control centre · "
+                   "Right-click: more · Drag to move")
         self.hint.setWordWrap(True)
         cv.addWidget(self.hint)
 
         self.root.addWidget(self.card)
+        # Card sits centred over the (wider) control-centre panel below it.
+        self.root.setAlignment(self.card, Qt.AlignHCenter)
+
+        # Control centre — a SECOND, deliberately separate glass panel below
+        # the card, split from it by CENTRE_GAP. Opened by double-click.
+        self.center = ControlCenter(
+            on_config_changed=self._centre_config_changed)
+        self.center.themeToggleRequested.connect(self.set_theme)
+        self.center.setObjectName("center")
+        self.root.addSpacing(CENTRE_GAP)
+        self.root.addWidget(self.center)
+        self.center.setVisible(False)
+        self._centre_size = None
+
         self.card.setVisible(False)
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -220,11 +264,20 @@ class IslandWindow(QWidget):
             self.collapsed.setVisible(not self.expanded)
             self.card.setVisible(self.expanded)
             if self.expanded:
-                self.setFixedSize(EXPANDED_W, EXPANDED_H)
+                self.card.setFixedSize(EXPANDED_W, self.card.sizeHint().height()
+                                       or EXPANDED_H)
                 if is_corner:
                     self._move_to_corner()
             else:
+                self.card.setFixedWidth(EXPANDED_W)
                 self.setFixedSize(COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H)
+        # The control centre only exists in card mode.
+        self.center.setVisible(bool(self.expanded and self.centre_open))
+        if not self.centre_open:
+            self.center.hide()
+        else:
+            w, h = self._centre_geometry()
+            self.setFixedSize(w, h)
         # Enforce animation end-state: layout fights during the flight can
         # leave a wrong size; the recorded target always wins.
         if self._target_geom is not None:
@@ -284,6 +337,10 @@ class IslandWindow(QWidget):
         self._animate_to(EXPANDED_W, EXPANDED_H, anchor_corner=(self.cfg.get("mode") == "corner"))
 
     def collapse(self):
+        was_centre = self.centre_open
+        if was_centre:
+            self.close_centre()
+            return
         if not self.expanded:
             return
         self.expanded = False
@@ -297,6 +354,67 @@ class IslandWindow(QWidget):
 
     def toggle(self):
         self.collapse() if self.expanded else self.expand()
+
+    # ---------- control centre (double click) ----------
+    def _centre_geometry(self) -> tuple[int, int]:
+        """Window size for card + gap + centre panel.
+
+        The centre panel has a FIXED height so the layout can never squeeze
+        the card and pull the two containers into each other; the feed list
+        scrolls instead. On a short screen the panel shrinks to its minimum
+        before anything is allowed to overlap.
+        """
+        g = self._screen_geo()
+        avail_h = max(240, g.height() - 24)
+        card_h = self.card.sizeHint().height() or EXPANDED_H
+        panel_h = CENTRE_H
+        if card_h + CENTRE_GAP + panel_h > avail_h:
+            panel_h = max(CENTRE_MIN_H, avail_h - card_h - CENTRE_GAP)
+        h = card_h + CENTRE_GAP + panel_h
+        w = min(CENTRE_W, max(CENTRE_MIN_W, g.width() - 24))
+        if self._centre_size != (w, panel_h):
+            self._centre_size = (w, panel_h)
+            self.center.setFixedSize(w, panel_h)
+        return w, h
+
+    def open_centre(self):
+        """Second panel, below the card with a visible gap."""
+        if not self.cfg.get("centre", {}).get("enabled", True):
+            self.hint.setText(
+                "Control centre is switched off in config.json "
+                "(centre.enabled)")
+            return
+        if not self.expanded:
+            self.expand()
+        if self.centre_open:
+            return
+        self.centre_open = True
+        w, h = self._centre_geometry()
+        self.center.show()
+        self.center.sync_config(self.cfg)
+        x, y = self._centre_origin(w, h)
+        self._animate_to_rect(QRect(x, y, w, h))
+        self.set_emotion("35")
+
+    def close_centre(self):
+        if not self.centre_open:
+            return
+        self.centre_open = False
+        self.center.hide()
+        self.card.setFixedWidth(EXPANDED_W)
+        self._animate_to(EXPANDED_W, EXPANDED_H,
+                         anchor_corner=(self.cfg.get("mode") == "corner"))
+
+    def _centre_origin(self, w: int, h: int) -> tuple[int, int]:
+        """Keep the wider panel on screen, biased to the current position."""
+        g = self._screen_geo()
+        cur = self.geometry()
+        x = min(max(cur.x(), g.x()), g.x() + max(0, g.width() - w))
+        y = min(max(cur.y(), g.y()), g.y() + max(0, g.height() - h))
+        return x, y
+
+    def _centre_config_changed(self):
+        self.cfg = cfgmod.load()
 
     def _animate_to_rect(self, rect: QRect):
         cur = self.geometry()
@@ -404,11 +522,28 @@ class IslandWindow(QWidget):
         was_drag = self._moved
         self._dragging = False
         if event.button() == Qt.LeftButton and not was_drag:
-            self.toggle()
+            # Click -> card, and a second click inside the double-click
+            # interval escalates to the control centre. Both clicks are
+            # consumed by this branch, so there is no toggle-fighting and
+            # no artificial delay before the island opens.
+            now = time.monotonic()
+            interval = QApplication.doubleClickInterval() / 1000.0
+            if now - self._last_click < interval:
+                self._last_click = 0.0
+                self.open_centre()
+            else:
+                self._last_click = now
+                self.toggle()
         elif was_drag and self.cfg.get("mode") == "island" and not self.expanded:
             g = self.geometry()
             self.cfg["island_x"], self.cfg["island_y"] = g.x(), g.y()
             cfgmod.save(self.cfg)
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key_Escape:
+            self.collapse()
+            return
+        super().keyPressEvent(event)
 
     # ---------- timers ----------
     def _tick_clock(self):
@@ -528,6 +663,28 @@ class IslandWindow(QWidget):
             self.appear_tab.set_theme(name)
         except Exception:
             pass
+        try:
+            self.center._theme = name
+            self.center.apply_palette(self._centre_palette())
+        except Exception:
+            pass
+
+    def _centre_palette(self) -> dict:
+        """Map the active theme onto the palette the painted widgets want."""
+        t = themesmod._resolve(self.cfg.get("theme", "black"))
+        return {
+            "ink": _qt_color(t.get("text", "#f2efe8")),
+            "sub": _qt_color(t.get("subtext", "#a8a49d")),
+            "muted": _qt_color(t.get("muted", "#6f6c68")),
+            "text": _qt_color(t.get("text", "#f2efe8")),
+            "accent": _qt_color(t.get("accent", "#59d98c")),
+            "track": _qt_color(t.get("tab", "#17171b")),
+            "bg": _qt_color(t.get("card_bg", "#0d0d10")),
+            "pane": _qt_color(t.get("pane", "#101013")),
+            "btn": _qt_color(t.get("btn", "#1d1d22")),
+            "btn_border": _qt_color(t.get("btn_border", "#2c2c33")),
+            "off": "#55555c",
+        }
 
     # ---------- menu ----------
     def _menu(self, pos):
@@ -597,6 +754,13 @@ class IslandWindow(QWidget):
             emo_m.addAction(a)
 
         m.addSeparator()
+        centre_a = QAction("Control centre", self)
+        centre_a.setCheckable(True)
+        centre_a.setChecked(self.centre_open)
+        centre_a.setShortcut("Ctrl+Space")
+        centre_a.triggered.connect(
+            lambda: self.close_centre() if self.centre_open else self.open_centre())
+        m.addAction(centre_a)
         top = QAction("Snap to top-center", self)
         top.triggered.connect(self._snap_top)
         m.addAction(top)

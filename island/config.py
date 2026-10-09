@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from . import feeds as feedsmod
+
 APP_NAME = "bot-island"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -43,6 +45,11 @@ DEFAULTS = {
         "controllerPos": None,
     },
     "spotify": {"service": False, "overlay": False},
+    # Control centre (the second panel, opened by double-clicking the island).
+    # `feeds` is a plain [{name, url}] list so it stays hand-editable; the
+    # seed list only applies until the user edits it.
+    "centre": {"enabled": True,
+               "feeds": [dict(f) for f in feedsmod.DEFAULT_FEEDS]},
 }
 
 

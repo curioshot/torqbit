@@ -18,15 +18,55 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
 ## Interact
 
 - **Click** island/quarter: expand / collapse
+- **Double-click**: open the **control centre** — a second panel below the
+  card, separated by an 8px gap
 - **Drag** island: move (saved to `~/.config/bot-island/config.json`)
+- **Esc** / the `–` button: step back one level (centre → card → island)
 - **Right-click**: Design (island ⇄ corner), Corner, Face, Bot shape,
-  Emotion, Snap to top-center, Quit
+  Emotion, Control centre (`Ctrl+Space`), Snap to top-center, Quit
 - Expanded panel tabs: **Bot/Time** (emotions, face picker, creature name,
   shuffle), **Calendar** (add events), **System/Notes** (CPU/RAM/temp,
   autosaved notes), **Appearance** (5 themes + creature backdrop),
   **Service** (Instagram + Spotify)
 - Live **CPU temperature** next to the clock (capsule, header, System tab)
 - Emoji-free UI: every icon is inline SVG and tints with the active theme
+
+## Control centre (double-click)
+
+A second glass panel under the card: mic / output / brightness sliders and a
+grid of toggles on the left, a live RSS list in the middle, and a ring gauge
+(temp, RAM, load, network throughput) on the right.
+
+**Every control is capability-gated.** Before it does anything the bot asks
+what this machine can actually do, and a control that cannot act renders
+disabled with the reason in its tooltip — it never silently does nothing.
+
+| Control | How it is driven | On this machine |
+|---|---|---|
+| Brightness | `/sys/class/backlight` when writable, else `xrandr --output … --brightness` | software (no backlight device in a VM) |
+| Mic / output volume | `pactl` (install with `sudo apt install pulseaudio-utils`), falling back to `pw-cli` | output works; the mic source ignores writes, so it self-disables |
+| Network, airplane | NetworkManager via `nmcli` | working |
+| Wi-Fi / Bluetooth | NM radio + adapter presence | no adapter here, so both are disabled |
+| Do not disturb | Plasma 6 desktop-appletsrc | working |
+| Lock screen | `loginctl lock-session` | working |
+
+Writes are always **read back** before being reported as done: PipeWire
+accepts `pactl set-source-volume` with exit status 0 and then ignores it on a
+suspended device, so a success code alone proves nothing.
+
+**Feeds.** `+` opens a picker with a built-in catalog grouped by category
+(News, Tech, Games, Science, Sport — every URL verified live) plus a box for
+any custom RSS/Atom URL. Everything is stored as a plain
+`[{name, url}]` list under `centre.feeds` in `config.json`, so feeds can be
+added, removed or reordered by hand. A feed that rots degrades to one quiet
+"unavailable" row.
+
+```json
+"centre": { "enabled": true, "feeds": [ {"name": "BBC World", "url": "https://…"} ] }
+```
+
+Polling only runs while the panel is visible, so a collapsed island costs
+nothing.
 
 ## Themes (Appearance tab)
 
@@ -88,6 +128,7 @@ through verified-good creatures.
 
 ```
 main.py  island/{window,face,tabs,config,service_tab,reels,browsers}.py
+        island/{center,widgets,sysctl,feeds}.py        ← control centre
 assets/{blobatar,emotion-ball,reels}/
 tools/blobatar-entry.ts   # bundle source for assets/blobatar/blobatar-face.js
 ```
@@ -97,6 +138,11 @@ no extra dependency) and `island/browsers.py` does browser discovery, launch
 and the optional PATH wrapper. `assets/reels/` is the page-side engine,
 injected at runtime; it is storage-agnostic and can also be loaded by an
 extension if you ever want one back.
+
+The control centre splits cleanly by concern: `island/sysctl.py` is the
+capability-probing backend layer, `island/widgets.py` the painted widgets,
+`island/feeds.py` the RSS reader and `island/center.py` the container that
+composes them.
 
 Settings live in one place — `~/.config/bot-island/config.json`. The page reads
 them when it is injected and, over CDP, writes changes from the video pill
