@@ -23,10 +23,12 @@ DEFAULTS = {
     "face_name": "island-bot", # blobatar creature seed (any string)
     "face_bg": "none",         # blobatar backdrop: none | squircle | circle | square
     "theme": "black",          # liquid | white | black | system | minimal
-    "instagram": {              # ReelScroll replacement (bot-native)
+    "instagram": {              # native Reels control (bot-driven browser)
         "service": False,       # master service switch
         "enabled": True,
-        "wheelEnabled": True,   # wheel remap needs the browser extension
+        "browserFamily": "chromium",  # chromium | firefox
+        "appMode": True,        # chrome-less window vs a normal tab
+        "wheelEnabled": True,   # one wheel notch == one reel (in-page)
         "invertWheel": False,
         "smooth": True,
         "cooldownMs": 800,
@@ -36,6 +38,9 @@ DEFAULTS = {
         "allowArrows": False,
         "controllerEnabled": True,
         "autoAdvance": True,
+        "playbackRate": 1,
+        "controllerMini": False,
+        "controllerPos": None,
     },
     "spotify": {"service": False, "overlay": False},
 }

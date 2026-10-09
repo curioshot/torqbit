@@ -23,7 +23,8 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
   Emotion, Snap to top-center, Quit
 - Expanded panel tabs: **Bot/Time** (emotions, face picker, creature name,
   shuffle), **Calendar** (add events), **System/Notes** (CPU/RAM/temp,
-  autosaved notes), **Appearance** (5 themes + creature backdrop)
+  autosaved notes), **Appearance** (5 themes + creature backdrop),
+  **Service** (Instagram + Spotify)
 - Live **CPU temperature** next to the clock (capsule, header, System tab)
 - Emoji-free UI: every icon is inline SVG and tints with the active theme
 
@@ -36,15 +37,38 @@ switches too; the choice persists.
 ## Service tab (Instagram + Spotify)
 
 Two 20px-radius tiles next to Appearance. Each opens its settings page with
-a service toggle — when on, the bot auto-detects the app and runs itself.
+a service toggle — when on, the bot detects what you're using and drives it
+itself.
 
-- **Instagram** (ReelScroll replacement, pure Python via X11): toggle +
-  live Reels detection across Chrome tabs, installed web apps (PWA), and
-  native app windows; Prev/Next reel buttons (focused-window key synthesis,
-  verified live — no extension needed for keys), full extension settings
-  mirror (keys capturable, cooldown, threshold, arrows, controller,
-  auto-advance). Wheel flip stays in the browser extension (needs page JS)
-  and is marked as such.
+- **Instagram** — Reels control runs **natively inside the bot**. There is no
+  browser extension: the bot connects to your browser over a debug protocol
+  and injects the same page-side engine (now in `assets/reels/`), so *wheel
+  flip works too*, along with the floating video controller (play/pause,
+  scrub, ±5s, 0.5–3×, simulated reverse, picture-in-picture) and
+  auto-advance.
+
+  Supported browsers:
+
+  | Browser | Transport |
+  |---|---|
+  | Chromium, Chrome, Brave, Edge, Opera, Vivaldi, Arc | Chrome DevTools Protocol |
+  | Firefox | WebDriver BiDi (Remote Agent) |
+  | anything else | X11 key synthesis — next/prev only |
+
+  **First run:** click **Open Instagram** in the Service tab. The bot starts a
+  window of its own, on a profile of its own, and you log into Instagram there
+  once. Chromium 136+ ignores the debug port on a default profile, so a
+  separate profile is mandatory — which is also the safer choice: the bot never
+  reads your everyday profile, cookies or passwords.
+
+  **To use the browser you start yourself,** tick *Also control Reels when I
+  start the browser myself*. That installs a small wrapper in `~/.local/bin`
+  so every launch of that browser comes up instrumented and the bot just
+  attaches. Off by default, with an uninstall button beside it — the debug
+  port is then open for *all* your browsing in that browser, not just Reels.
+
+  If no instrumented browser is found, the bot falls back to sending next/prev
+  keys straight to the Instagram window, so the buttons keep working.
 - **Spotify**: toggle + MPRIS detection, auto-launches the app if missing,
   now-playing with synced lrclib lyrics highlighting live, floating-overlay
   start/stop, web-player login hint.
@@ -63,9 +87,20 @@ through verified-good creatures.
 ## Files
 
 ```
-main.py  island/{window,face,tabs,config}.py  assets/{blobatar,emotion-ball}/
+main.py  island/{window,face,tabs,config,service_tab,reels,browsers}.py
+assets/{blobatar,emotion-ball,reels}/
 tools/blobatar-entry.ts   # bundle source for assets/blobatar/blobatar-face.js
 ```
+
+`island/reels.py` holds the browser bridge (CDP + BiDi, over `QWebSocket`, so
+no extra dependency) and `island/browsers.py` does browser discovery, launch
+and the optional PATH wrapper. `assets/reels/` is the page-side engine,
+injected at runtime; it is storage-agnostic and can also be loaded by an
+extension if you ever want one back.
+
+Settings live in one place — `~/.config/bot-island/config.json`. The page reads
+them when it is injected and, over CDP, writes changes from the video pill
+straight back through the bot.
 
 Rebuild the blobatar bundle: `npx esbuild tools/blobatar-entry.ts --bundle
 --format=iife --minify --outfile=assets/blobatar/blobatar-face.js`

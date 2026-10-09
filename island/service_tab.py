@@ -1,9 +1,9 @@
-"""Service tab: Instagram (ReelScroll replacement) + Spotify (lyrics) services.
+"""Service tab: Instagram (Reels) + Spotify (lyrics) services.
 
-Home shows two 20px-radius square tiles. Each tile opens its settings page
-with a service toggle: when on, the bot auto-detects the app in use and runs
-the bot-native behavior itself — no browser extension needed for keys/buttons,
-no separate lyrics window needed for Spotify.
+Instagram runs natively: island/reels.py injects assets/reels/ into the page
+over CDP/BiDi, so wheel flip, the video controller and auto-advance all work
+with no browser extension. The X11 key path in island/services.py is kept as
+a fallback for browsers the bot cannot attach to.
 """
 from __future__ import annotations
 
@@ -11,13 +11,15 @@ from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGridLayout,
-    QCheckBox, QSpinBox, QStackedWidget, QToolButton, QListWidget,
+    QCheckBox, QComboBox, QSpinBox, QStackedWidget, QToolButton, QListWidget,
     QSizePolicy,
 )
 
+from . import browsers
 from . import config as cfgmod
 from . import icons as iconsmod
 from . import services as svc
+from .reels import ReelsService
 
 
 def _dot(color: str) -> str:
@@ -40,13 +42,14 @@ class _BackHeader(QWidget):
 
 
 class InstagramPage(QWidget):
-    """ReelScroll settings, mirrored from the extension into the bot."""
+    """Native Reels control: browser launch, live status, settings mirror."""
 
     _ARROW_SYMS = {"Left": 0xFF51, "Up": 0xFF52, "Right": 0xFF53, "Down": 0xFF54}
 
-    def __init__(self, on_back, parent=None):
+    def __init__(self, on_back, service=None, parent=None):
         super().__init__(parent)
-        self._capturing: str | None = None  # "next" | "prev" | None
+        self.svc = service                      # ReelsService, shared
+        self._capturing: str | None = None      # "next" | "prev" | None
         self.setFocusPolicy(Qt.StrongFocus)
         lay = QVBoxLayout(self)
         lay.addWidget(_BackHeader("Instagram — Reels", on_back))
@@ -66,8 +69,8 @@ class InstagramPage(QWidget):
 
         top = QHBoxLayout()
         self.service = QCheckBox("Service on")
-        self.service.setToolTip("When on, the bot watches for Instagram Reels\n"
-                                "and takes over reel control itself.")
+        self.service.setToolTip("When on, the bot attaches to Instagram in your\n"
+                                "browser and controls Reels itself.")
         self.service.checkStateChanged.connect(self._save_service)
         top.addWidget(self.service)
         self.dot = QLabel()
@@ -77,6 +80,31 @@ class InstagramPage(QWidget):
         self.status.setWordWrap(True)
         top.addWidget(self.status, 1)
         body.addLayout(top)
+
+        # ---- browser -------------------------------------------------
+        br = QGridLayout()
+        br.addWidget(QLabel("Browser"), 0, 0)
+        self.browser = QComboBox()
+        self.browser.setToolTip("Which browser the bot launches and drives.")
+        self.browser.currentIndexChanged.connect(self._save_browser)
+        br.addWidget(self.browser, 0, 1)
+        self.open_btn = QPushButton("Open Instagram")
+        self.open_btn.setToolTip("Launches a bot-managed window with its own\n"
+                                 "profile. Log into Instagram there once.")
+        self.open_btn.clicked.connect(self._open)
+        br.addWidget(self.open_btn, 0, 2)
+        br.setColumnStretch(1, 1)
+        body.addLayout(br)
+
+        self.shim = QCheckBox("Also control Reels when I start the browser myself")
+        self.shim.setToolTip(
+            "Installs a small wrapper earlier on PATH so every launch of this\n"
+            "browser comes up instrumented.\n\n"
+            "The debug port is then open for ALL of your browsing in that\n"
+            "browser, not just Reels. The bot still never reads your normal\n"
+            "profile, cookies or passwords.")
+        self.shim.checkStateChanged.connect(self._toggle_shim)
+        body.addWidget(self.shim)
 
         nav = QHBoxLayout()
         self.prev_btn = QPushButton("Prev reel")
@@ -91,8 +119,8 @@ class InstagramPage(QWidget):
         self.boxes: dict[str, QCheckBox] = {}
         for i, (key, label, tip) in enumerate([
             ("enabled", "Enabled", "Master switch for reel control"),
-            ("wheelEnabled", "Wheel flip", "Wheel remap needs page JS — stays in the browser extension"),
-            ("invertWheel", "Invert wheel", "Wheel direction, used by the browser extension"),
+            ("wheelEnabled", "Wheel flip", "One wheel notch = exactly one reel"),
+            ("invertWheel", "Invert wheel", "Reverse the wheel direction"),
             ("smooth", "Smooth jumps", "Animate the jump between reels"),
             ("allowArrows", "Arrow keys", "Let arrow keys flip reels too"),
             ("controllerEnabled", "Video controller", "Floating pill over the playing reel"),
@@ -131,8 +159,10 @@ class InstagramPage(QWidget):
         tune.setColumnStretch(3, 1)
         body.addLayout(tune)
 
-        note = QLabel("Wheel flip runs in the browser extension (needs page JS). "
-                      "Keys, buttons and detection run natively in the bot.")
+        note = QLabel("Everything runs natively inside the bot — no browser "
+                      "extension is installed. When no instrumented browser is "
+                      "available the bot falls back to sending next/prev keys "
+                      "to the Instagram window directly.")
         note.setWordWrap(True)
         body.addWidget(note)
         body.addStretch(1)
@@ -147,6 +177,8 @@ class InstagramPage(QWidget):
         cfg = cfgmod.load()
         cfg["instagram"].update(patch)
         cfgmod.save(cfg)
+        if self.svc:
+            self.svc.sync_config(cfg["instagram"])
 
     def _load_all(self):
         s = self._cfg()
@@ -166,9 +198,63 @@ class InstagramPage(QWidget):
         self.prev_key.setText(str(s.get("prev_label", "W")))
         self.next_key.setText(str(s.get("next_label", "S")))
 
+        self._fill_browsers(s.get("browserFamily", "chromium"))
+
+    def _fill_browsers(self, current: str):
+        found = browsers.discover()
+        self.browser.blockSignals(True)
+        self.browser.clear()
+        for b in found:
+            self.browser.addItem(b["label"], b["family"])
+        idx = self.browser.findData(current)
+        if idx < 0 and found:
+            idx = 0
+            current = found[0]["family"]
+        if idx >= 0:
+            self.browser.setCurrentIndex(idx)
+        self.browser.setEnabled(bool(found))
+        self.browser.blockSignals(False)
+        if not found:
+            self.open_btn.setEnabled(False)
+            self.open_btn.setToolTip("No supported browser found")
+        self._sync_shim()
+
+    def _sync_shim(self):
+        fam = self.browser.currentData() or "chromium"
+        try:
+            installed = browsers.shim_installed(fam)
+        except Exception:
+            installed = False
+        self.shim.blockSignals(True)
+        self.shim.setChecked(installed)
+        self.shim.blockSignals(False)
+
+    # ----- actions -----
     def _save_service(self):
         self._patch({"service": self.service.isChecked()})
         self.refresh()
+
+    def _save_browser(self):
+        fam = self.browser.currentData()
+        if not fam:
+            return
+        self._patch({"browserFamily": fam})
+        if self.svc:
+            self.svc.set_family(fam)
+        self._sync_shim()
+
+    def _toggle_shim(self):
+        if not self.svc:
+            return
+        fam = self.browser.currentData() or "chromium"
+        msg = (self.svc.uninstall_shim() if self.shim.isChecked()
+               else self.svc.install_shim())
+        self.status.setText(msg)
+        self._sync_shim()
+
+    def _open(self):
+        if self.svc:
+            self.status.setText(self.svc.open_instagram())
 
     def _save_box(self, key: str):
         self._patch({key: self.boxes[key].isChecked()})
@@ -214,29 +300,37 @@ class InstagramPage(QWidget):
 
     # ----- live -----
     def _nudge(self, which: str):
-        s = self._cfg()
-        sym = int(s.get(f"{which}_keysym", 83 if which == "next" else 87))
-        ok, msg = svc.send_reel_key(sym)
-        self.status.setText(("Sent " if ok else "Could not send ") +
-                            f"{which} key ({msg})")
+        if not self.svc:
+            return
+        fn = self.svc.next_reel if which == "next" else self.svc.prev_reel
+
+        def done(result, error):
+            origin, payload = result if result else ("x11", {})
+            ok = bool(payload.get("ok")) if isinstance(payload, dict) else False
+            if error:
+                self.status.setText(f"Could not send {which}: {error}")
+            elif origin == "native":
+                self.status.setText(
+                    f"{which.capitalize()} reel (in-page)"
+                    if ok else f"Bot could not turn: {payload}")
+            else:
+                self.status.setText(
+                    f"Sent {which} key ({payload.get('detail', '')})"
+                    if ok else "No Instagram window found")
+
+        fn(done)
 
     def refresh(self):
         s = self._cfg()
         on = bool(s.get("service"))
-        self.service.blockSignals(True)
-        self.service.setChecked(on)
-        self.service.blockSignals(False)
-        detected, detail = svc.detect_instagram()
-        active = on and bool(s.get("enabled", True)) and detected
+        st = self.svc.state() if self.svc else {}
+        connected = bool(st.get("connected"))
+        reels = bool(st.get("reelsPage"))
+        active = connected and reels and on and bool(s.get("enabled", True))
         self.dot.setStyleSheet(_dot("#59d98c" if active else "#55555c"))
-        if not on:
-            self.status.setText("Service off — toggle on to watch for Reels.")
-        elif not detected:
-            self.status.setText(f"Watching… ({detail})")
-        else:
-            self.status.setText(f"Controlling Reels — {detail}")
-        self.prev_btn.setEnabled(active)
-        self.next_btn.setEnabled(active)
+        self.status.setText(st.get("detail", "") or "idle")
+        self.prev_btn.setEnabled(on)
+        self.next_btn.setEnabled(on)
 
 
 class SpotifyPage(QWidget):
@@ -407,13 +501,18 @@ class ServiceTab(QWidget):
         self.stack = QStackedWidget()
         lay.addWidget(self.stack, 1)
 
+        # One shared Reels controller: browser launch, page bridge and the
+        # X11 key fallback live behind a single object the page polls.
+        self.reels = ReelsService(self)
+        self.reels.message.connect(lambda m: None)
+
         home = QWidget()
         grid = QGridLayout(home)
         grid.setAlignment(Qt.AlignCenter)
         self.tiles: dict[str, QToolButton] = {}
         for i, (key, label, icon, tip) in enumerate([
             ("instagram", "Instagram", "instagram",
-             "ReelScroll replacement: reel control + settings"),
+             "Reels control: native, no browser extension"),
             ("spotify", "Spotify", "spotify",
              "Now playing + synced lyrics + overlay"),
         ]):
@@ -430,10 +529,13 @@ class ServiceTab(QWidget):
         grid.setSpacing(16)
         self.stack.addWidget(home)
 
-        self.insta = InstagramPage(lambda: self.stack.setCurrentIndex(0))
+        self.insta = InstagramPage(lambda: self.stack.setCurrentIndex(0),
+                                   service=self.reels)
         self.spot = SpotifyPage(lambda: self.stack.setCurrentIndex(0))
         self.stack.addWidget(self.insta)
         self.stack.addWidget(self.spot)
+
+        self.reels.sync_config(cfgmod.load().get("instagram", {}))
 
         self._t = QTimer(self)
         self._t.timeout.connect(self._poll)
@@ -444,6 +546,10 @@ class ServiceTab(QWidget):
         self.stack.setCurrentIndex(1 if key == "instagram" else 2)
 
     def _poll(self):
+        try:
+            self.reels.tick()
+        except Exception:
+            pass
         try:
             self.insta.refresh()
         except Exception:

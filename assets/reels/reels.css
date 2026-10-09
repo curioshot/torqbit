@@ -1,0 +1,21 @@
+/* ReelScroll — isolated toast, namespaced to avoid IG collisions */
+.irs-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%) scale(0.9);
+  z-index: 2147483647;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font: 600 22px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 10px 18px;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.irs-toast.irs-show {
+  opacity: 1;
+  transform: translateX(-50%) scale(1);
+}

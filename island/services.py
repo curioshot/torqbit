@@ -1,9 +1,10 @@
-"""Service backends: Instagram Reels detection + key control, Spotify bridge.
+"""Service backends: Instagram Reels control + Spotify bridge.
 
-Instagram: watches the active X11 window. When a browser shows Instagram
-Reels and the service is on, the bot takes over reel control (next/prev via
-XTest key synthesis) — no browser extension needed for keys and buttons.
-Wheel interception still needs page JS (marked extension-only in the UI).
+Instagram: the real work lives in island/reels.py, which drives the page
+over CDP/BiDi so wheel flip, the video controller and auto-advance all work.
+What stays here is the browser-agnostic fallback: watching the active X11
+window and synthesising next/prev keys, so the buttons still do something
+when no instrumented browser is around.
 
 Spotify: reuses the vendored spotify/ project (providers/lrc/timing) for
 MPRIS now-playing + synced lyrics, and drives its overlay CLI.
