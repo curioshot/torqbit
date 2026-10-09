@@ -57,6 +57,36 @@ def _clamp01(v: float) -> float:
     return max(0.0, min(1.0, v))
 
 
+class TTLCache:
+    """Memoise an expensive read for a few seconds.
+
+    NetworkManager answers cost 30-90ms per `nmcli` spawn, and the control
+    centre polls several times a second. A toggle indicator does not need
+    to be current to the millisecond; three seconds is imperceptible.
+    """
+
+    def __init__(self, ttl: float = 3.0):
+        self.ttl = ttl
+        self._v: dict[str, object] = {}
+        self._t: dict[str, float] = {}
+
+    def get(self, key: str):
+        if key not in self._v:
+            return None
+        if time.monotonic() - self._t.get(key, 0.0) > self.ttl:
+            self._v.pop(key, None)
+            return None
+        return self._v[key]
+
+    def put(self, key: str, value) -> None:
+        self._v[key] = value
+        self._t[key] = time.monotonic()
+
+    def clear(self) -> None:
+        self._v.clear()
+        self._t.clear()
+
+
 # --------------------------------------------------------------- brightness
 
 
@@ -77,6 +107,7 @@ class Brightness:
         self.reason = "no brightness control found"
         self.max = 1
         self._outputs: list[str] = []
+        self._cached: float | None = None
         self.probe()
 
     # -- discovery ------------------------------------------------------
@@ -143,16 +174,32 @@ class Brightness:
         return "hardware" if self.kind == self.HARDWARE else "software"
 
     def get(self) -> float:
-        """Current brightness, 0.0 - 1.0."""
+        """Current brightness, 0.0 - 1.0.
+
+        The software path shells out to `xrandr --verbose`, which costs about
+        190ms because it enumerates every display mode. That is far too slow
+        for a UI poll, so the value is cached and only refreshed on demand —
+        callers that just changed the brightness already know the answer.
+        """
         if self.kind == self.HARDWARE:
             try:
                 for z in self._outputs:
-                    return _clamp01(int(
+                    v = _clamp01(int(
                         (Path(z) / "brightness").read_text().strip()) / self.max)
+                    self._cached = v
+                    return v
             except Exception:
                 pass
         elif self.kind == self.SOFTWARE and self._outputs:
-            rc, out = _run(["xrandr", "--verbose"])
+            if self._cached is not None:
+                return self._cached
+            return self.refresh()
+        return self._cached or 0.0
+
+    def refresh(self, timeout: float = 4.0) -> float:
+        """Re-read the real value from the system, bypassing the cache."""
+        if self.kind == self.SOFTWARE and self._outputs:
+            rc, out = _run(["xrandr", "--verbose"], timeout=timeout)
             if rc == 0:
                 want = self._outputs[0]
                 block, on = [], False
@@ -166,8 +213,8 @@ class Brightness:
                         block.append(line)
                 m = re.search(r"Brightness:\s+([0-9.]+)", "\n".join(block))
                 if m:
-                    return _clamp01(_f(m.group(1), 1.0))
-        return 0.0
+                    self._cached = _clamp01(_f(m.group(1), 1.0))
+        return self._cached or 0.0
 
     def set(self, value: float) -> bool:
         v = _clamp01(_f(value, 0.0))
@@ -176,6 +223,7 @@ class Brightness:
                 try:
                     (Path(z) / "brightness").write_text(
                         str(int(round(v * self.max))))
+                    self._cached = v
                     return True
                 except Exception:
                     continue
@@ -186,6 +234,8 @@ class Brightness:
                 rc, _ = _run(["xrandr", "--output", out_name,
                               "--brightness", f"{v:.3f}"])
                 ok = ok and rc == 0
+            if ok:
+                self._cached = v   # the server accepted it; trust the write
             return ok
         return False
 
@@ -214,6 +264,7 @@ class Audio:
         self.reason = "no audio control backend found"
         self._pw_nodes: dict[str, int] = {}
         self._pw_ts = 0.0
+        self._cache = TTLCache(3.0)
         self.probe()
 
     def probe(self) -> str:
@@ -298,8 +349,18 @@ class Audio:
         return _clamp01(max(_f(n) for n in nums))
 
     # -- public ----------------------------------------------------------
-    def volume(self, kind: str = "sink") -> float | None:
+    def volume(self, kind: str = "sink", fresh: bool = False) -> float | None:
         """0.0 - 1.0, or None when unknown."""
+        if not fresh:
+            hit = self._cache.get(f"vol:{kind}")
+            if hit is not None:
+                return hit
+        out = self._volume_uncached(kind)
+        if out is not None:
+            self._cache.put(f"vol:{kind}", out)
+        return out
+
+    def _volume_uncached(self, kind: str):
         if self.kind == self.PACLT:
             return self._pactl_vol(kind)
         if self.kind == self.PWCLI:
@@ -325,10 +386,21 @@ class Audio:
                   f"{int(round(want * 100))}"])
         else:
             return False
-        got = self.volume(kind)
+        self._cache.clear()
+        got = self.volume(kind, fresh=True)
         return got is not None and abs(got - want) <= 0.06
 
-    def muted(self, kind: str = "sink") -> bool | None:
+    def muted(self, kind: str = "sink", fresh: bool = False) -> bool | None:
+        if not fresh:
+            hit = self._cache.get(f"mute:{kind}")
+            if hit is not None:
+                return hit
+        val = self._muted_uncached(kind)
+        if val is not None:
+            self._cache.put(f"mute:{kind}", val)
+        return val
+
+    def _muted_uncached(self, kind: str):
         if self.kind == self.PACLT:
             what = "get-sink-mute" if kind == "sink" else "get-source-mute"
             rc, out = _run([self.PACLT, what, "@DEFAULT_%s@" % kind.upper()])
@@ -350,7 +422,8 @@ class Audio:
                   "true" if value else "false"])
         else:
             return False
-        got = self.muted(kind)
+        self._cache.clear()
+        got = self.muted(kind, fresh=True)
         return got is not None and got == bool(value)
 
     def toggle_mic(self) -> bool | None:
@@ -373,6 +446,7 @@ class Network:
         self.reason = "NetworkManager (nmcli) not available"
         self.has_wifi = False
         self.has_adapter = False
+        self._cache = TTLCache(4.0)
         self.probe()
 
     def probe(self) -> str:
@@ -409,49 +483,72 @@ class Network:
         return "enabled" in out.lower()
 
     def set_wifi(self, on: bool) -> bool:
+        self._cache.clear()
         rc, _ = _run(["nmcli", "radio", "wifi", "on" if on else "off"])
         return rc == 0
 
-    def radios_enabled(self) -> bool | None:
+    def radios_enabled(self, fresh: bool = False) -> bool | None:
         """False when at least one radio is off — i.e. airplane mode is on."""
+        if not fresh:
+            hit = self._cache.get("radios")
+            if hit is not None:
+                return hit
         rc, out = _run(["nmcli", "radio"])
         if rc != 0:
             return None
         states = [ln.split()[-1].lower() for ln in out.splitlines() if ln.strip()]
         states = [s for s in states if s in ("enabled", "disabled", "missing")]
-        return bool(states) and all(s != "disabled" for s in states)
+        val = bool(states) and all(s != "disabled" for s in states)
+        self._cache.put("radios", val)
+        return val
 
     def set_airplane(self, off: bool) -> bool:
         """off=True -> turn every radio off (airplane on)."""
+        self._cache.clear()
         rc, _ = _run(["nmcli", "radio", "all", "off" if off else "on"])
         return rc == 0
 
-    def primary_device(self) -> str | None:
+    def primary_device(self, fresh: bool = False) -> str | None:
+        if not fresh:
+            hit = self._cache.get("primary")
+            if hit is not None:
+                return hit
         rc, out = _run(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device"])
         if rc != 0:
             return None
+        found = None
         for line in out.splitlines():
             parts = line.split(":")
             if len(parts) >= 3 and parts[2].startswith("connected") \
                     and parts[1] != "loopback":
-                return parts[0]
-        return None
+                found = parts[0]
+                break
+        self._cache.put("primary", found)
+        return found
 
-    def link_up(self) -> bool | None:
-        dev = self.primary_device()
+    def link_up(self, fresh: bool = False) -> bool | None:
+        if not fresh:
+            hit = self._cache.get("link")
+            if hit is not None:
+                return hit
+        dev = self.primary_device(fresh)
         if not dev:
             return None
         rc, out = _run(["nmcli", "-t", "-f", "DEVICE,STATE", "device"])
         if rc != 0:
             return None
+        val = None
         for line in out.splitlines():
             p = line.split(":")
             if p and p[0] == dev:
-                return p[-1].startswith("connected")
-        return None
+                val = p[-1].startswith("connected")
+                break
+        self._cache.put("link", val)
+        return val
 
     def set_link(self, up: bool) -> bool:
         """Bring the primary link up or down by cycling its connection."""
+        self._cache.clear()
         rc, out = _run(["nmcli", "-t", "-f", "NAME,DEVICE,STATE", "connection",
                         "--active"])
         if rc != 0:

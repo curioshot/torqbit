@@ -73,17 +73,18 @@ class VerticalSlider(Tintable, QWidget):
         self.setMaximumWidth(64)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setMouseTracking(True)
+        # The animation timer only runs while a value is actually moving:
+        # three sliders at 25Hz each is 75 needless wakeups a second.
         self._tick = QTimer(self)
         self._tick.timeout.connect(self._animate)
-        self._tick.start(40)
 
     # -- state ----------------------------------------------------------
     def set_value(self, v: float, emit: bool = False) -> None:
         v = max(0.0, min(1.0, float(v)))
-        if abs(v - self._value) < 0.004:
-            self._value = v
-            return
         self._value = v
+        if abs(self._shown - v) > 0.004:
+            if not self._tick.isActive():
+                self._tick.start(40)
         if emit:
             self.valueChanged.emit(v)
         self.update()
@@ -155,12 +156,14 @@ class VerticalSlider(Tintable, QWidget):
     # -- animation ------------------------------------------------------
     def _animate(self) -> None:
         if not self.isVisible():
+            self._tick.stop()
             return
         if abs(self._shown - self._value) > 0.004:
             self._shown += (self._value - self._shown) * 0.35
             self.update()
         else:
             self._shown = self._value
+            self._tick.stop()   # settled: stop waking up
 
     # -- paint ----------------------------------------------------------
     def paintEvent(self, event):  # noqa: N802

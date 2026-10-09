@@ -416,7 +416,7 @@ class ControlCenter(GlassPanel):
         # ---- polling ----
         self._poll = QTimer(self)
         self._poll.timeout.connect(self.tick)
-        self._poll.setInterval(1200)
+        self._poll.setInterval(1500)
 
         self.backend = sysctl.Backend.get()
         self.caps = self.backend.caps()
@@ -493,15 +493,22 @@ class ControlCenter(GlassPanel):
     # ------------------------------------------------------------ poll
     def tick(self) -> None:
         self._refresh_metrics()
-        self._refresh_toggles()
+        # Toggle indicators change at human speed; re-reading NetworkManager
+        # and pactl on every tick is what made this panel feel heavy.
+        self._toggle_tick = getattr(self, "_toggle_tick", 0) + 1
+        if self._toggle_tick % 2 == 0:
+            self._refresh_toggles()
 
     def _refresh_metrics(self, force: bool = False) -> None:
         b = self.backend
+        if force:
+            b.audio._cache.clear()
+            b.network._cache.clear()
         if self.caps["volume"]["available"] and self.s_mic.isVisible():
-            v = b.audio.volume("source")
+            v = b.audio.volume("source", fresh=force)
             if v is not None and not self.s_mic._press:
                 self.s_mic.set_value(v)
-            o = b.audio.volume("sink")
+            o = b.audio.volume("sink", fresh=force)
             if o is not None and not self.s_out._press:
                 self.s_out.set_value(o)
         if self.caps["brightness"]["available"] and not self.s_bright._press:

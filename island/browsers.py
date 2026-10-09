@@ -319,6 +319,44 @@ def _shim_family(body: str) -> str | None:
     return None
 
 
+MAX_SHIM_BYTES = 4096      # our shims are ~300 bytes
+_SHIM_HEAD = 1024          # never read more than the header comment
+
+
+def _safe_read(p: Path, limit: int = MAX_SHIM_BYTES) -> str:
+    """Read at most `limit` bytes of a candidate shim.
+
+    Reading whole files here is catastrophic: ~/.local/bin typically holds
+    large tool binaries, and this function runs on a 2-second UI poll.
+    """
+    try:
+        with open(p, "rb") as fh:
+            return fh.read(limit).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+
+
+def _plausible_shim(p: Path) -> bool:
+    """Cheap pre-filter so we never open a large binary at all."""
+    try:
+        st = p.stat()
+        if not p.is_file() or st.st_size > MAX_SHIM_BYTES:
+            return False
+        # A shim is a script: executable, and usually a shebang.
+        with open(p, "rb") as fh:
+            head = fh.read(4)
+        return head[:2] == b"#!" or bool(st.st_mode & 0o111)
+    except Exception:
+        return False
+
+
+_shim_cache: dict[str, str | None] = {}
+
+
+def _invalidate_shim_cache() -> None:
+    _shim_cache.clear()
+
+
 def find_shim(family: str) -> Path | None:
     """The installed shim for `family`, whatever it ended up being named.
 
@@ -328,27 +366,15 @@ def find_shim(family: str) -> Path | None:
     """
     d = _shim_dir()
     try:
-        for p in sorted(d.iterdir()):
-            # Filter by the parsed header, not _is_shim(): _is_shim() matches
-            # the very marker we are looking for and would skip every hit.
-            if not p.is_file():
-                continue
-            if _shim_family(_safe_read(p)) == family:
-                return p
+        entries = sorted(d.iterdir())
     except Exception:
-        pass
+        return None
+    for p in entries:
+        if not _plausible_shim(p):
+            continue
+        if _shim_family(_safe_read(p)) == family:
+            return p
     return None
-
-
-def shim_installed(family: str) -> bool:
-    return find_shim(family) is not None
-
-
-def _safe_read(p: Path) -> str:
-    try:
-        return p.read_text(encoding="utf-8")
-    except Exception:
-        return ""
 
 
 def install_shim(family: str) -> dict:
@@ -381,6 +407,7 @@ def install_shim(family: str) -> dict:
         target.chmod(0o755)
     except Exception as e:
         return {"ok": False, "error": f"could not write {target}: {e}"}
+    _invalidate_shim_cache()
     return {"ok": True, "already": False, "path": str(target), "binary": binary}
 
 
@@ -395,11 +422,18 @@ def uninstall_shim(family: str) -> dict:
         p.unlink()
     except Exception as e:
         return {"ok": False, "error": str(e)}
+    _invalidate_shim_cache()
     return {"ok": True, "already": False, "path": str(p)}
 
 
 def shim_status() -> dict:
-    """Per-family shim state for the UI."""
+    """Per-family shim state for the UI.
+
+    Cached: a shim only appears or disappears when the user ticks the
+    checkbox, so rescanning the directory on a 2-second poll is pure waste.
+    """
+    if _shim_cache:
+        return dict(_shim_cache)
     out = {}
     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
     for family in FAMILIES:
@@ -415,7 +449,8 @@ def shim_status() -> dict:
                                if str(_shim_dir()) in path_dirs else -1),
             "real_dir_index": _real_dir_index(family, path_dirs),
         }
-    return out
+    _shim_cache.update(out)
+    return dict(out)
 
 
 def shim_effective(family: str) -> bool:

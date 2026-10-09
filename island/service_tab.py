@@ -21,6 +21,10 @@ from . import icons as iconsmod
 from . import services as svc
 from .reels import ReelsService
 
+# The Service tab spawns subprocesses (NetworkManager, pactl, spotify), so it
+# must not poll while hidden, and must not poll faster than it needs to.
+POLL_MS = 2500
+
 
 def _dot(color: str) -> str:
     return (f"background: {color}; border-radius: 5px; min-width: 10px;"
@@ -449,18 +453,22 @@ class SpotifyPage(QWidget):
         self.ov_btn.blockSignals(True)
         self.ov_btn.setChecked(bool(s.get("overlay")))
         self.ov_btn.blockSignals(False)
+        if not on:
+            # With the service off there is nothing to read: skip the MPRIS
+            # query, which costs a ~190ms `busctl` spawn, and skip the
+            # process check, which costs another ~40ms `pgrep`.
+            self.dot.setStyleSheet(_dot("#55555c"))
+            self.status.setText("Service off — toggle on to follow Spotify.")
+            if self.track.text() != "No track":
+                self.track.setText("No track")
+                self.lyrics.clear()
+            return
         # overlay latch watchdog: latched on -> must be running
         if on and s.get("overlay"):
             if not svc.overlay_running():
                 svc.place_overlay_default()
                 svc.overlay_start_detached()
-        elif not s.get("overlay") and svc.overlay_running() and not on:
-            svc.overlay_cmd("stop")
-        snap = svc.spotify_snapshot() if on else None
-        if not on:
-            self.dot.setStyleSheet(_dot("#55555c"))
-            self.status.setText("Service off — toggle on to follow Spotify.")
-            return
+        snap = svc.spotify_snapshot()
         if not snap:
             self.dot.setStyleSheet(_dot("#55555c"))
             if svc.spotify_process_running():
@@ -539,13 +547,28 @@ class ServiceTab(QWidget):
 
         self._t = QTimer(self)
         self._t.timeout.connect(self._poll)
-        self._t.start(2000)
+        self._t.start(POLL_MS)
         self._poll()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        if not self._t.isActive():
+            self._t.start()
+        self._poll()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        self._t.stop()
 
     def open(self, key: str):
         self.stack.setCurrentIndex(1 if key == "instagram" else 2)
 
     def _poll(self):
+        # Nothing to do while hidden: the Service tab lives inside the card,
+        # and this poll spawns subprocesses. A collapsed island must cost
+        # nothing.
+        if not self.isVisible():
+            return
         try:
             self.reels.tick()
         except Exception:

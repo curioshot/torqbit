@@ -77,7 +77,8 @@ class IslandWindow(QWidget):
         self._place_initial()
         self._raise_timer = QTimer(self)
         self._raise_timer.timeout.connect(self._keep_above)
-        self._raise_timer.start(2000)
+        # 4s is plenty to beat a fullscreen app; 2s was pure X traffic.
+        self._raise_timer.start(4000)
 
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._tick_clock)
