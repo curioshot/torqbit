@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>blobatar-face</title>
+<link rel="stylesheet" href="motion.css">
+<link rel="stylesheet" href="gaze.css">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent !important;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+  #face { width: 100vw; height: 100vh; background: transparent; }
+  #face svg { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="face"></div>
+<script src="blobatar-face.js"></script>
+<script>
+(function () {
+  function qp(name, fb) {
+    try {
+      var v = new URLSearchParams(location.search).get(name);
+      return v === null ? fb : v;
+    } catch (e) { return fb; }
+  }
+  var seedName = qp('name', 'island-bot');
+  var expression = qp('expression', 'idle');
+  var bg = qp('background', 'none'); // none|squircle|circle|square
+  var travel = parseFloat(qp('travel', '4')) || 4;
+  var el = document.getElementById('face');
+
+  function bgOpt() { return bg === 'none' ? false : bg; }
+  BlobatarFace.mount(el, {
+    name: seedName, expression: expression,
+    background: bgOpt(), travel: travel, gaze: true
+  });
+
+  window.__faceSetExpression = function (e) { return BlobatarFace.setExpression(e); };
+  window.__faceSetName = function (n) { seedName = n; return BlobatarFace.setName(n); };
+  window.__faceSetBackground = function (b) { bg = b; return BlobatarFace.setBackground(b === 'none' ? false : b); };
+  window.__faceLook = function (nx, ny) {
+    try {
+      var svg = el.querySelector('svg');
+      if (!svg) return;
+      var r = svg.getBoundingClientRect();
+      BlobatarFace.lookAt({ x: r.left + r.width / 2 + nx * 800, y: r.top + r.height / 2 + ny * 800 });
+    } catch (e) {}
+  };
+})();
+</script>
+</body>
+</html>

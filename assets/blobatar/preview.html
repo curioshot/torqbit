@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="motion.css">
+<link rel="stylesheet" href="gaze.css">
+<style>body{background:#141417;color:#eee;font:12px sans-serif} .grid{display:flex;flex-wrap:wrap;gap:12px} .cell{width:120px;text-align:center} .face{width:110px;height:110px}</style>
+</head><body>
+<h3>seed × expression preview (gen2, squircle plate)</h3>
+<div class="grid" id="grid"></div>
+<script src="blobatar-face.js"></script>
+<script>
+const seeds = ["island-bot","aora","grok","pixel","miso","taro","nebula","bot"];
+const exprs = ["idle","happy","thinking","sleepy","love","surprised"];
+const grid = document.getElementById("grid");
+for (const s of seeds) {
+  for (const e of exprs) {
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    const d = document.createElement("div");
+    d.className = "face";
+    cell.appendChild(d);
+    const lab = document.createElement("div");
+    lab.textContent = s + " / " + e;
+    cell.appendChild(lab);
+    grid.appendChild(cell);
+    BlobatarFace.mount(d, {name: s, expression: e, background: "squircle", gaze: false});
+  }
+}
+</script>
+</body></html>

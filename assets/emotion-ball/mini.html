@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bot-face</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent !important;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+  #bot { width: 100vw; height: 100vh; background: transparent; }
+  #bot svg { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="bot"></div>
+<script src="js/rings.js"></script>
+<script src="js/emotions.js"></script>
+<script src="js/ball.js"></script>
+<script src="js/engine.js"></script>
+<script>
+(function () {
+  function qp(name, fb) {
+    try {
+      var v = new URLSearchParams(location.search).get(name);
+      return v === null ? fb : v;
+    } catch (e) { return fb; }
+  }
+  var emotion = qp('emotion', '02');
+  var shape = qp('shape', 'blob');
+  var eyeScale = parseFloat(qp('eyeScale', '1.6')) || 1.6;
+  var lite = qp('lite', '1') === '1';
+
+  var el = document.getElementById('bot');
+  var ball = null;
+  try {
+    ball = EmotionBall.create(el, {
+      emotion: emotion,
+      shape: shape,
+      eyeScale: eyeScale,
+      idle: { standbyAfter: 60000, sleepAfter: 180000, standbyId: '02', sleepId: '00' },
+      lite: lite,
+      fallbackId: '02'
+    });
+    // click inside face -> playful spin (Qt handles expand separately)
+    el.addEventListener('dblclick', function () { try { ball.spin(1); } catch (e) {} });
+    // gentle gaze drift so it feels alive even without mouse
+    var t = 0;
+    setInterval(function () {
+      if (!ball) return;
+      // micro drift is already built-in; nothing needed
+      t += 1;
+    }, 4000);
+  } catch (e) {
+    el.innerHTML = '<div style="color:#888;font:12px sans-serif">face err</div>';
+    console.error(e);
+  }
+
+  window.__bot = ball;
+  window.__botSetEmotion = function (id) {
+    try { if (ball) return ball.setEmotion(id); } catch (e) {}
+    return false;
+  };
+  window.__botGaze = function (nx, ny) {
+    try { if (ball) ball.setGaze(nx, ny); } catch (e) {}
+  };
+  window.__botSpin = function () { try { if (ball) ball.spin(1); } catch (e) {} };
+  window.__botBurst = function (n) { try { if (ball) ball.burst(n || 20); } catch (e) {} };
+  window.__botRecreate = function (newShape, newEmotion) {
+    try {
+      if (ball) ball.destroy();
+      el.innerHTML = '';
+      ball = EmotionBall.create(el, {
+        emotion: newEmotion || '02',
+        shape: newShape || 'blob',
+        eyeScale: eyeScale,
+        idle: { standbyAfter: 60000, sleepAfter: 180000, standbyId: '02', sleepId: '00' },
+        lite: lite,
+        fallbackId: '02'
+      });
+      window.__bot = ball;
+    } catch (e) { console.error(e); }
+  };
+})();
+</script>
+</body>
+</html>
