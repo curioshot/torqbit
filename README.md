@@ -1,5 +1,10 @@
 # Bot Island — always-on-top desktop island
 
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Platform](https://img.shields.io/badge/platform-Linux%20%2B%20X11-444)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Tests](https://img.shields.io/badge/tests-184%20passing-4c1)
+
 A frameless overlay that lives in front of every window. Three states, one
 row, no boxes: the containers, buttons and controls sit directly on the
 screen with **no background and no border** — only the components themselves
@@ -38,7 +43,7 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
   Emotion, Control centre (`Ctrl+Space`), Snap to top-center, Quit
 - Card tabs: **Bot/Time** (clock, full-size face, emotions, shape, face
   picker, creature name, shuffle), **Calendar** (add/edit/delete events),
-  **System/Notes** (CPU/RAM/temp, autosaved notes), **Appearance** (5 themes
+  **System/Notes** (CPU/RAM/temp, autosaved notes), **Appearance** (7 themes
   + creature backdrop), **Service** (Instagram + Spotify)
 - Live **CPU temperature** next to the clock (pill, header, System tab)
 - Emoji-free UI: every icon is inline SVG and tints with the active theme
@@ -116,12 +121,14 @@ nothing.
 
 ## Themes (Appearance tab)
 
-White · Black · System default (follows your KDE palette) · Minimal ·
-Liquid Glass. Right-click → Theme switches too; the choice persists.
+Liquid Glass · Clean White · White · Modern Dark · Black · System default
+(follows your KDE palette) · Minimal. Right-click → Theme switches too; the
+choice persists.
 
-Since the containers no longer paint, a theme now only sets **ink**: text,
-subtext, muted and accent. The five remain genuinely different, but they
-change colour rather than surface — there are no surfaces left to change.
+Since the containers no longer paint, a theme mostly sets **ink**: text,
+subtext, muted and accent, plus whatever translucency it still needs. The
+seven are genuinely different, but they change colour and alpha rather than
+surface — there are no surfaces left to change.
 
 ## Service tab (Instagram + Spotify)
 
@@ -215,3 +222,38 @@ constructs every screen and drives every state transition.
 npx esbuild tools/blobatar-entry.ts --bundle --format=iife --minify \
   --outfile=assets/blobatar/blobatar-face.js
 ```
+
+## Contributing
+
+Patches welcome, but please keep the two rules this codebase leans on:
+
+- **Probes stay off the GUI thread.** Anything that shells out or reads
+  `/sys` goes through `island/probe.py`.
+- **A control that can't act must say so.** Capability probes in
+  `island/sysctl.py` return a reason, and the UI renders it disabled rather
+  than pretending. If you add a control, add its probe too.
+
+Run `pytest tests/ -q` before opening a PR — it's fast and it runs headless.
+
+## Security
+
+This bot drives your real desktop: it sets volume, toggles radios, locks the
+session and can suspend the machine. Two things to know:
+
+- The Reels bridge can install a wrapper in `~/.local/bin` that opens a
+  browser with a debug port. That's off by default, only installed when you
+  tick the box, and has an uninstall button next to it. The debug port is
+  open for **all** browsing in that browser while it's installed.
+- Instagram login happens in a browser profile the bot creates for itself, so
+  your everyday profile, cookies and passwords are never read.
+
+Found something? Open an issue.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Bundled third-party code keeps its own terms: `assets/blobatar/` and
+`assets/reels/` are MIT. **`assets/emotion-ball/` is personal and research use
+only** — see its `THIRD_PARTY_NOTICE.md`. The MIT license does not extend to
+it.
