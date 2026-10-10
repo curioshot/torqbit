@@ -2,15 +2,17 @@
 
 Fetching is non-blocking: QNetworkAccessManager does the work and the reply
 lands on the Qt event loop, so a slow or dead feed can never stall the
-island. Parsing uses QXmlStreamReader (QtCore), so this adds no dependency.
+island. Parsing uses xml.etree (stdlib), so this adds no dependency.
 
-The catalog is grouped by category so the "+" button can offer a browsable
-picker, and the user can always add a raw URL instead.
+The catalog is grouped by category so the picker can offer a browsable list,
+and the user can always add a raw URL instead.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 import os
+import colorsys
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -52,7 +54,17 @@ CATALOG: dict[str, list[tuple[str, str]]] = {
 REFRESH_MS = 10 * 60 * 1000     # refetch interval
 TIMEOUT_MS = 12000
 MAX_ITEMS_PER_FEED = 5
-ITEM_TTL_S = 30 * 60            # cache items for half an hour
+# Must stay *below* REFRESH_MS, or every refresh tick hits the cache and
+# `continue`s and the feed is frozen for the life of the process.
+ITEM_TTL_S = 5 * 60
+# A failure is remembered only briefly: one 500 or Wi-Fi blip should not
+# silence a feed for half an hour.
+ERROR_TTL_S = 60
+# Guards against a pathological feed (or a slow retry loop) opening more
+# connections than we can comfortably hold open.
+MAX_CONCURRENT_FETCH = 6
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_CACHE_FILES = 300
 
 # Seeded on first run so the panel is not an empty box; everything here can be
 # removed with the "-" in the picker, and more added with "+".
@@ -75,7 +87,7 @@ class FeedReader(QObject):
         self._nam = QNetworkAccessManager(self)
         self._feeds: list[dict] = []      # [{"name","url"}]
         self._items: list[dict] = []      # merged, newest first
-        self._cache: dict[str, tuple[float, list[dict]]] = {}
+        self._cache: dict[str, tuple[float, list[dict], bool]] = {}
         self._images: dict[str, str | None] = {}   # feed url -> image url
         self._inflight: set[str] = set()
         self._img_inflight: set[str] = set()
@@ -87,6 +99,7 @@ class FeedReader(QObject):
         self._feeds = [f for f in (feeds or [])
                        if isinstance(f, dict) and f.get("url")]
         self._prune_cache()
+        self._prune_images()
         self.refresh()
 
     def feeds(self) -> list[dict]:
@@ -94,6 +107,11 @@ class FeedReader(QObject):
 
     def items(self) -> list[dict]:
         return list(self._items)
+
+    def feed_items(self, url: str) -> list[dict]:
+        """Parsed items for one feed, or [] — the public view of the cache."""
+        hit = self._cache.get(url)
+        return list(hit[1]) if hit else []
 
     def start(self) -> None:
         self._timer.start(REFRESH_MS)
@@ -103,21 +121,34 @@ class FeedReader(QObject):
 
     def _prune_cache(self) -> None:
         now = time.time()
-        self._cache = {k: v for k, v in self._cache.items()
-                       if now - v[0] < ITEM_TTL_S}
+        live = {f["url"] for f in self._feeds}
+        # Drop entries for feeds that no longer exist, and anything past TTL.
+        # A successful entry lives ITEM_TTL_S, a failed one only ERROR_TTL_S.
+        self._cache = {
+            k: v for k, v in self._cache.items()
+            if k in live and now - v[0] < (ERROR_TTL_S if v[2] else ITEM_TTL_S)
+        }
+
+    def _prune_images(self) -> None:
+        live = {f["url"] for f in self._feeds}
+        self._images = {k: v for k, v in self._images.items() if k in live}
 
     # ------------------------------------------------------------ fetch
     def refresh(self) -> None:
         self._prune_cache()
         now = time.time()
+        budget = MAX_CONCURRENT_FETCH - len(self._inflight)
         for feed in self._feeds:
+            if budget <= 0:
+                break
             url = feed["url"]
             hit = self._cache.get(url)
-            if hit and now - hit[0] < ITEM_TTL_S:
+            if hit and now - hit[0] < (ERROR_TTL_S if hit[2] else ITEM_TTL_S):
                 continue
             if url in self._inflight:
                 continue
             self._fetch(feed)
+            budget -= 1
 
     def _fetch(self, feed: dict) -> None:
         url = feed["url"]
@@ -144,12 +175,18 @@ class FeedReader(QObject):
             if not ok:
                 self._show_error(feed, url, reply.errorString())
                 return
-            items = parse_feed(body)
+            # Parse once and reuse the tree: the old code called
+            # fromstring() twice on identical bytes for every feed.
+            root = _parse_xml(body)
+            if root is None:
+                self._show_error(feed, url, reply.errorString())
+                return
+            items = parse_root(root)
             if not items:
                 self._show_error(feed, url, reply.errorString())
                 return
-            self._cache[url] = (time.time(), items)
-            self._note_image(feed, url, body)
+            self._cache[url] = (time.time(), items, False)
+            self._note_image(feed, url, root)
         except Exception as e:
             self._show_error(feed, url, str(e))
             return
@@ -171,16 +208,20 @@ class FeedReader(QObject):
             return None
         return cached_image(u)
 
-    def _note_image(self, feed: dict, url: str, body: bytes) -> None:
-        img = image_url_from_feed(body)
+    def _note_image(self, feed: dict, url: str, root) -> None:
+        img = image_url_from_root(root)
         self._images[url] = img
         if not img:
             return
+        p = image_cache_path(img)
+        if p is None:
+            self._images[url] = None
+            return
         try:
-            if image_cache_path(img).exists():
+            if p.exists():
                 self.imageReady.emit(url)
                 return
-        except Exception:
+        except OSError:
             pass
         self._fetch_image(url, img)
 
@@ -192,6 +233,10 @@ class FeedReader(QObject):
             req = QNetworkRequest(QUrl(img))
             req.setRawHeader(b"User-Agent", APP_UA.encode())
             req.setTransferTimeout(TIMEOUT_MS)
+            # Redirects could walk an https logo off to file://; refuse them.
+            req.setAttribute(
+                QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
             reply = self._nam.get(req)
         except Exception:
             self._img_inflight.discard(img)
@@ -203,10 +248,20 @@ class FeedReader(QObject):
         self._img_inflight.discard(img)
         try:
             body = bytes(reply.readAll())
-            if reply.error() == QNetworkReply.NoError and body:
-                p = image_cache_path(img)
-                p.write_bytes(body)
-                self.imageReady.emit(feed_url)
+            if reply.error() != QNetworkReply.NoError or not body:
+                return
+            # A feed can advertise an arbitrary URL; cap what we keep on disk.
+            if len(body) > MAX_IMAGE_BYTES:
+                return
+            p = image_cache_path(img)
+            if p is None:
+                return
+            image_cache_dir(create=True)
+            tmp = p.with_name(p.name + ".part")
+            tmp.write_bytes(body)
+            os.replace(tmp, p)
+            _evict_image_cache()
+            self.imageReady.emit(feed_url)
         except Exception:
             pass
         finally:
@@ -216,9 +271,8 @@ class FeedReader(QObject):
                 pass
 
     def _show_error(self, feed: dict, url: str, detail: str = "") -> None:
-        """Remember the failure so the list can show it quietly."""
-        self._cache[url] = (time.time(), [])
-        self._cache.setdefault("__errors__", (time.time(), []))
+        """Remember the failure briefly so the list can show it quietly."""
+        self._cache[url] = (time.time(), [], True)
         if detail:
             self.error.emit(f"{feed['name']}: {detail}")
 
@@ -232,7 +286,7 @@ class FeedReader(QObject):
                                "feed": feed["name"], "link": "", "ts": 0.0,
                                "pending": True})
                 continue
-            _, items = hit
+            _, items, failed = hit
             if not items:
                 merged.append({"title": f"{feed['name']} — feed unavailable",
                                "feed": feed["name"], "link": "", "ts": 0.0,
@@ -251,6 +305,34 @@ class FeedReader(QObject):
 # --------------------------------------------------------------- parsing
 def _text(node) -> str:
     return "".join(node.itertext()).strip() if node is not None else ""
+
+
+def _parse_xml(data: bytes):
+    """Bytes -> ElementTree root, or None. Never raises."""
+    try:
+        return ElementTree.fromstring(data)
+    except Exception:
+        return None
+
+
+def _safe_http_url(raw: str | None) -> str | None:
+    """Only ever hand back an http(s) URL.
+
+    Feed bodies are untrusted input and QNetworkAccessManager will happily
+    fetch file:// and http://169.254.169.254/, so every URL that comes out of
+    a feed has to be scheme-checked here rather than at the fetch site.
+    """
+    if not raw:
+        return None
+    url = raw.strip()
+    if not url:
+        return None
+    low = url.lower()
+    if low.startswith("https://"):
+        return url
+    if low.startswith("http://"):
+        return url
+    return None
 
 
 def _parse_date(raw: str) -> float:
@@ -281,15 +363,15 @@ def _parse_date(raw: str) -> float:
 
 
 def parse_feed(data: bytes) -> list[dict]:
-    """Parse RSS 2.0, RDF or Atom. Returns [{title, link, ts}] newest first.
+    """Parse RSS 2.0, RDF or Atom. Returns [{title, link, ts}] newest first."""
+    root = _parse_xml(data)
+    return parse_root(root) if root is not None else []
 
-    Uses ElementTree rather than QXmlStreamReader so this function stays
-    unit-testable without a Qt event loop.
-    """
+
+def parse_root(root) -> list[dict]:
+    """Same as parse_feed but takes an already-parsed tree."""
     out: list[dict] = []
-    try:
-        root = ElementTree.fromstring(data)
-    except Exception:
+    if root is None:
         return out
 
     tag = _local(root.tag)
@@ -340,6 +422,11 @@ def _local(tag: str) -> str:
 
 
 def image_url_from_feed(data: bytes) -> str | None:
+    root = _parse_xml(data)
+    return image_url_from_root(root) if root is not None else None
+
+
+def image_url_from_root(root) -> str | None:
     """Best feed logo advertised in the feed's own XML.
 
     Deliberately never contacts a third-party favicon service: that would
@@ -348,30 +435,30 @@ def image_url_from_feed(data: bytes) -> str | None:
     The scan is namespace-agnostic on purpose — `<icon>` and
     `<itunes:image>` only exist inside a namespaced document, and matching on
     a fixed path finds neither of them.
+
+    Every candidate goes through _safe_http_url: this is untrusted input, and
+    an unchecked value here becomes a file:// read or an SSRF pivot.
     """
-    try:
-        root = ElementTree.fromstring(data)
-    except Exception:
+    if root is None:
         return None
 
     # 1) channel/feed level logo, in document order
     for el in root.iter():
         if _local(el.tag) not in ("image", "logo", "icon"):
             continue
-        href = (el.get("href") or "").strip()
-        if href:
-            return href                       # <itunes:image href="..."/>
-        resource = (el.get("resource") or "").strip()
-        if resource:
-            return resource                   # RDF <image rdf:resource>
+        for attr in ("href", "resource"):
+            found = _safe_http_url(el.get(attr))
+            if found:
+                return found
         text = (el.text or "").strip()
-        if text and text.lower().startswith("http"):
-            return text                       # Atom <icon>https://…</icon>
+        found = _safe_http_url(text)
+        if found:
+            return found
         for child in el.iter():
-            if _local(child.tag) == "url" and (child.text or "").strip():
-                return child.text.strip()     # <image><url>…</url></image>
-        if text:
-            return text
+            if _local(child.tag) == "url":
+                found = _safe_http_url(child.text)
+                if found:
+                    return found
 
     # 2) first item's own attached image
     for item in root.iter():
@@ -381,8 +468,8 @@ def image_url_from_feed(data: bytes) -> str | None:
             name = _local(el.tag)
             if name not in ("enclosure", "content", "thumbnail", "image"):
                 continue
-            url = (el.get("url") or el.get("href") or "").strip()
-            if not url:
+            found = _safe_http_url(el.get("url")) or _safe_http_url(el.get("href"))
+            if not found:
                 continue
             # media:thumbnail commonly carries no type at all
             mime = (el.get("type") or "").strip()
@@ -390,7 +477,7 @@ def image_url_from_feed(data: bytes) -> str | None:
                 continue
             if not mime and name not in ("thumbnail", "image"):
                 continue
-            return url
+            return found
     return None
 
 
@@ -398,16 +485,19 @@ _NS_ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 _NS_MEDIA = "http://search.yahoo.com/mrss/"
 
 
-def image_cache_dir():
+def image_cache_dir(create: bool = False):
+    """Cache root. Created lazily — `cached_image()` only ever reads."""
     base = Path(os.environ.get(
         "XDG_CACHE_HOME", Path.home() / ".cache")) / "bot-island" / "feedimg"
-    base.mkdir(parents=True, exist_ok=True)
+    if create:
+        base.mkdir(parents=True, exist_ok=True)
     return base
 
 
 def image_cache_path(url: str):
     """Deterministic cache path for a feed image URL."""
-    import hashlib
+    if not _safe_http_url(url):
+        return None
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20]
     ext = ".png"
     low = url.lower().split("?")[0]
@@ -418,25 +508,44 @@ def image_cache_path(url: str):
     return image_cache_dir() / (digest + ext)
 
 
+def _evict_image_cache(limit: int = MAX_CACHE_FILES) -> None:
+    """Bound the on-disk cache: feed logos carry cache-busting query strings,
+    so without this the cache grows without limit for the life of the install."""
+    try:
+        base = image_cache_dir()
+        files = [p for p in base.iterdir()
+                 if p.is_file() and not p.name.endswith(".part")]
+        if len(files) <= limit:
+            return
+        files.sort(key=lambda p: p.stat().st_mtime)
+        for p in files[:len(files) - limit]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def cached_image(url: str | None):
     """Bytes of a previously downloaded feed image, or None."""
     if not url:
         return None
     p = image_cache_path(url)
+    if p is None:
+        return None
     try:
         if p.exists() and p.stat().st_size > 0:
             return p.read_bytes()
-    except Exception:
+    except OSError:
         pass
     return None
 
 
 def mono_colour(name: str) -> str:
     """Stable pastel-ish accent for the monogram fallback."""
-    import hashlib
     h = hashlib.sha1((name or "?").encode("utf-8")).digest()
     hue = h[0] / 255.0
-    import colorsys
     r, g, b = colorsys.hsv_to_rgb(hue, 0.42, 0.86)
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 

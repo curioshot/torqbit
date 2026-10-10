@@ -12,44 +12,29 @@ from PySide6.QtWidgets import (
 )
 
 from . import config as cfgmod
+from . import colors as colorsmod
 from . import icons as iconsmod
 from . import sensors as sensorsmod
 from . import themes as themesmod
 from .center import ControlCenter, Rail
 from .face import FaceView
+from .geom import (COLLAPSED_CORNER, COLLAPSED_ISLAND_H, COLLAPSED_ISLAND_W,
+                   CENTRE_GAP, CENTRE_H, CENTRE_MIN_H, CENTRE_MIN_W, CENTRE_W,
+                   EXPANDED_H, EXPANDED_MAX_H, EXPANDED_W, ISLAND_TOP_INSET)
 from .glass import GlassPanel
 from .service_tab import ServiceTab
 from .tabs import BotTab, CalendarTab, SystemNotesTab, AppearanceTab
 
+__all__ = ["IslandWindow", "COLLAPSED_ISLAND_W", "COLLAPSED_ISLAND_H",
+           "COLLAPSED_CORNER", "EXPANDED_W", "EXPANDED_H", "CENTRE_GAP",
+           "CENTRE_MIN_W", "CENTRE_W", "CENTRE_H", "CENTRE_MIN_H"]
 
-COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H = 252, 42
-COLLAPSED_CORNER = 112
-EXPANDED_W, EXPANDED_H = 368, 540
-CENTRE_GAP = 8          # the visible break between the two containers
-CENTRE_MIN_W = 900
-CENTRE_W = 1120         # preferred width of the control-centre panel
-CENTRE_H = 300          # fixed height; the feed list scrolls inside
-CENTRE_MIN_H = 190
-
-
-def _qt_color(value) -> str:
-    """Theme colours are CSS strings like 'rgba(13, 13, 16, 246)'.
-
-    QColor cannot parse that spelling — it rejects it and every painted
-    widget then falls back to its (near-white) ink colour. Normalise to hex
-    here so the painted widgets always get a colour Qt understands.
-    """
-    import re
-    if not isinstance(value, str):
-        return "#000000"
-    s = value.strip()
-    m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)"
-                 r"(?:\s*,\s*([\d.]+))?\s*\)", s, re.I)
-    if m:
-        r, g, b = (int(m.group(i)) for i in (1, 2, 3))
-        r, g, b = (max(0, min(255, v)) for v in (r, g, b))
-        return f"#{r:02x}{g:02x}{b:02x}"
-    return s if s.startswith("#") else "#000000"
+# Geometry flight duration. Two animation helpers used to each hardcode 200,
+# with a 400ms "safety" timer at double that.
+ANIM_MS = 200
+ANIM_SETTLE_MS = ANIM_MS * 2
+# Waking -> idle mood change after the expand flight.
+WAKE_SETTLE_MS = 900
 
 
 class IslandWindow(QWidget):
@@ -197,19 +182,25 @@ class IslandWindow(QWidget):
         self.center.themeToggleRequested.connect(self.set_theme)
         self.center.setObjectName("center")
 
-        # Top row: the 1-inch control rail on the left, the card beside it.
-        # The rail has no panel of its own, so it sits on the wallpaper.
-        self.top_row = QHBoxLayout()
-        self.top_row.setContentsMargins(0, 0, 0, 0)
-        self.top_row.setSpacing(CENTRE_GAP)
+        # One row: the rail on the left, and a stacked area beside it that
+        # holds either the expanded card or the full island panel. The rail
+        # used to be re-parented between two layouts depending on state,
+        # which is why only one of the two could ever be on screen.
+        self.main_row = QHBoxLayout()
+        self.main_row.setContentsMargins(0, 0, 0, 0)
+        self.main_row.setSpacing(CENTRE_GAP)
         self.rail = self.center.rail
         self.rail.setVisible(False)
-        self.top_row.addWidget(self.rail)
-        self.top_row.addWidget(self.card, 1)
-        self.top_row.addStretch(1)
-        self.root.addLayout(self.top_row)
-        self.root.addSpacing(CENTRE_GAP)
-        self.root.addWidget(self.center)
+        self.main_row.addWidget(self.rail)
+
+        self.stack_area = QVBoxLayout()
+        self.stack_area.setContentsMargins(0, 0, 0, 0)
+        self.stack_area.setSpacing(CENTRE_GAP)
+        self.stack_area.addWidget(self.card)
+        self.stack_area.addWidget(self.center)
+        self.main_row.addLayout(self.stack_area, 1)
+        self.root.addLayout(self.main_row)
+
         self.center.setVisible(False)
         self._centre_size = None
 
@@ -220,21 +211,50 @@ class IslandWindow(QWidget):
 
     # ---------- geometry ----------
     def _screen_geo(self) -> QRect:
-        s = QApplication.primaryScreen()
+        """The screen the island actually lives on, not always the primary.
+
+        A position saved on a second monitor used to be clamped straight
+        back onto the primary at the next start, so the widget jumped
+        displays every time the dock changed.
+        """
+        s = self.screen() if self.isVisible() else None
+        if s is None:
+            screens = QApplication.screens()
+            ix, iy = self.cfg.get("island_x"), self.cfg.get("island_y")
+            # Prefer whichever screen still contains the saved position.
+            if isinstance(ix, int) and isinstance(iy, int) and screens:
+                for cand in screens:
+                    g = cand.availableGeometry()
+                    if g.contains(QPoint(ix, iy)):
+                        return g
+            s = QApplication.primaryScreen() or (screens[0] if screens else None)
         if s:
             return s.availableGeometry()
         return QRect(0, 0, 1920, 1080)
+
+    @staticmethod
+    def _clamp(pos: int, lo: int, size: int, span: int) -> int:
+        """Keep `pos`..`pos`+`size` inside lo..lo+span.
+
+        The old form was `min(max(ix, g.x()), g.x() + g.width() - w)`, which
+        inverts when the window is wider than the screen: the upper bound
+        becomes *smaller* than the lower bound and the window is pushed off
+        the left edge.
+        """
+        hi = lo + max(0, span - size)
+        return min(max(pos, lo), hi)
 
     def _island_home_rect(self, w: int, h: int) -> QRect:
         """Saved island position, clamped on-screen (top-center fallback)."""
         g = self._screen_geo()
         ix, iy = self.cfg.get("island_x"), self.cfg.get("island_y")
-        if isinstance(ix, int) and isinstance(iy, int):
-            x = min(max(ix, g.x()), g.x() + g.width() - w)
-            y = min(max(iy, g.y()), g.y() + g.height() - h)
+        if isinstance(ix, int) and isinstance(iy, int) \
+                and not isinstance(ix, bool) and not isinstance(iy, bool):
+            x = self._clamp(ix, g.x(), w, g.width())
+            y = self._clamp(iy, g.y(), h, g.height())
         else:
             x = g.x() + (g.width() - w) // 2
-            y = g.y() + 8
+            y = g.y() + ISLAND_TOP_INSET
         return QRect(x, y, w, h)
 
     def _place_initial(self):
@@ -261,8 +281,42 @@ class IslandWindow(QWidget):
             x, y = g.x() + g.width() - w - m, g.y() + g.height() - h - m
         self.setGeometry(x, y, w, h)
 
+    def _rail_visible_now(self) -> bool:
+        """The rail is shown in both wide states — but not in corner mode,
+        where it has nothing to sit beside."""
+        if not self.expanded:
+            return False
+        return bool(self.centre_open) or self.cfg.get("mode") != "corner"
+
+    def _expanded_size(self) -> tuple[int, int]:
+        """Window size for the expanded card, including the rail.
+
+        The window contains rail + gap + card, so sizing the *window* to
+        EXPANDED_W (as the old two-row layout allowed) squeezed the rail out
+        and left a 368px window with a 172px rail inside it.
+
+        Height comes from the tallest tab rather than the card's own
+        sizeHint, which QTabWidget inflates to a value that does not match
+        anything actually on screen.
+        """
+        tallest = EXPANDED_H
+        for i in range(self.tabs.count()):
+            page = self.tabs.widget(i)
+            if page is not None:
+                tallest = max(tallest, page.sizeHint().height())
+        # Header, tab strip and hint label live above/below the pages.
+        card_h = min(tallest + 96, EXPANDED_MAX_H)
+        w = EXPANDED_W
+        if self._rail_visible_now():
+            w += self.rail.width() + CENTRE_GAP
+        return w, card_h
+
     def _apply_mode_visual(self):
         is_corner = self.cfg.get("mode") == "corner"
+        # `full` means the wide panel is showing; `card` means the expanded
+        # card is. They are mutually exclusive: both live in the same
+        # stacked area beside the rail.
+        full = bool(self.expanded and self.centre_open)
         if not self.expanded and is_corner:
             self.collapsed.setVisible(False)
             self.setFixedSize(COLLAPSED_CORNER, COLLAPSED_CORNER)
@@ -273,24 +327,36 @@ class IslandWindow(QWidget):
             self.setMinimumSize(0, 0)
             self.setMaximumSize(16777215, 16777215)
             self.collapsed.setVisible(not self.expanded)
-            self.card.setVisible(self.expanded)
-            if self.expanded:
-                self.card.setFixedSize(EXPANDED_W, self.card.sizeHint().height()
-                                       or EXPANDED_H)
+            self.card.setVisible(self.expanded and not full)
+            self.center.setVisible(full)
+            if full:
+                w, h = self._centre_geometry()
+                self.setFixedSize(w, h)
+            elif self.expanded:
+                ew, eh = self._expanded_size()
+                self.card.setFixedWidth(EXPANDED_W)
+                self.setFixedSize(ew, eh)
                 if is_corner:
                     self._move_to_corner()
             else:
                 self.card.setFixedWidth(EXPANDED_W)
                 self.setFixedSize(COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H)
-        # The control centre only exists in card mode; so does its rail.
-        centre_on = bool(self.expanded and self.centre_open)
-        self.rail.setVisible(centre_on)
-        self.center.setVisible(centre_on)
-        if not self.centre_open:
-            self.center.hide()
-        else:
-            w, h = self._centre_geometry()
-            self.setFixedSize(w, h)
+        self._update_rail(full, is_corner)
+
+    def _update_rail(self, full: bool = None, is_corner: bool = None) -> None:
+        """The rail exists in both wide states, never in the collapsed one.
+
+        Called directly from every transition as well as from the settle
+        callback: relying on the callback alone meant the rail stayed hidden
+        through the whole expand flight and only appeared at the end.
+        """
+        if full is None:
+            full = bool(self.expanded and self.centre_open)
+        if is_corner is None:
+            is_corner = self.cfg.get("mode") == "corner"
+        visible = bool(self.expanded and (full or not is_corner))
+        if self.rail.isVisible() != visible or self.rail.isHidden() == visible:
+            self.rail.setVisible(visible)
         # Enforce animation end-state: layout fights during the flight can
         # leave a wrong size; the recorded target always wins.
         if self._target_geom is not None:
@@ -326,9 +392,19 @@ class IslandWindow(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         c = self.cfg.get("corner", "top-right")
         w, h = self.width(), self.height()
+        # Read from the active theme. These were hardcoded to the `black`
+        # theme's values, so switching to white/minimal/liquid and then
+        # choosing corner mode gave you a black wedge.
+        t = themesmod.resolve(self.cfg.get("theme", "black"))
+        glass = t.get("glass", {})
+        fill = colorsmod.to_qcolor(glass.get("bottom") or t.get("card_bg", "#0d0d10"),
+                                   "#0d0d10")
+        edge = colorsmod.to_qcolor(glass.get("border") or t.get("card_border", "#2c2c33"),
+                                   "#2c2c33")
+        ink = colorsmod.to_qcolor(t.get("text", "#f2efe8"), "#f2efe8")
         # quarter pie centered on the screen corner
-        p.setBrush(QColor(12, 12, 15, 235))
-        p.setPen(QPen(QColor("#2b2b31"), 1.5))
+        p.setBrush(fill)
+        p.setPen(QPen(edge, 1.5))
         if c == "top-left":
             p.drawPie(-w, -h, 2 * w, 2 * h, 270 * 16, 90 * 16)
         elif c == "top-right":
@@ -337,17 +413,22 @@ class IslandWindow(QWidget):
             p.drawPie(-w, 0, 2 * w, 2 * h, 0 * 16, 90 * 16)
         else:
             p.drawPie(0, 0, 2 * w, 2 * h, 90 * 16, 90 * 16)
-        p.setPen(QColor("#f2efe8"))
-        p.drawText(QRect(0, 0, w, h), Qt.AlignCenter, datetime.now().strftime("%H:%M"))
+        p.setPen(ink)
+        # Only a quarter of this square is visible, so centring the clock in
+        # the full rect puts it in the clipped-away part of the pie.
+        p.drawText(QRect(0, 0, w, h),
+                   Qt.AlignCenter, self.clock_text())
 
     # ---------- expand / collapse (click) ----------
     def expand(self):
         if self.expanded:
             return
         self.expanded = True
+        self._update_rail()
         self.set_emotion("01")  # waking blip, engine auto-advances to idle
-        QTimer.singleShot(900, lambda: self.set_emotion("10") if self.expanded else None)
-        self._animate_to(EXPANDED_W, EXPANDED_H, anchor_corner=(self.cfg.get("mode") == "corner"))
+        QTimer.singleShot(WAKE_SETTLE_MS, lambda: self.set_emotion("10") if self.expanded else None)
+        w, h = self._expanded_size()
+        self._animate_to(w, h, anchor_corner=(self.cfg.get("mode") == "corner"))
 
     def collapse(self):
         was_centre = self.centre_open
@@ -357,6 +438,7 @@ class IslandWindow(QWidget):
         if not self.expanded:
             return
         self.expanded = False
+        self._update_rail()
         self.set_emotion("41")
         if self.cfg.get("mode") == "corner":
             self._animate_to(COLLAPSED_CORNER, COLLAPSED_CORNER, anchor_corner=True)
@@ -370,28 +452,23 @@ class IslandWindow(QWidget):
 
     # ---------- control centre (double click) ----------
     def _centre_geometry(self) -> tuple[int, int]:
-        """Window size for card + gap + centre panel.
+        """Window size for the full island: rail + the wide panel, one row.
 
-        The centre panel has a FIXED height so the layout can never squeeze
-        the card and pull the two containers into each other; the feed list
-        scrolls instead. On a short screen the panel shrinks to its minimum
-        before anything is allowed to overlap.
+        The panel has a FIXED height so the layout can never squeeze its
+        contents; the feed list scrolls instead. On a short screen the
+        panel shrinks to its minimum before anything is allowed to overlap.
         """
         g = self._screen_geo()
-        avail_h = max(240, g.height() - 24)
-        card_h = self.card.sizeHint().height() or EXPANDED_H
-        panel_h = CENTRE_H
-        if card_h + CENTRE_GAP + panel_h > avail_h:
-            panel_h = max(CENTRE_MIN_H, avail_h - card_h - CENTRE_GAP)
-        h = card_h + CENTRE_GAP + panel_h
+        avail_h = max(200, g.height() - 24)
+        panel_h = min(CENTRE_H, max(CENTRE_MIN_H, avail_h))
         w = min(CENTRE_W, max(CENTRE_MIN_W, g.width() - 24))
-        # The top row also has to fit the rail beside the card.
+        # The row also has to fit the rail beside the panel.
         need = Rail.WIDTH + CENTRE_GAP + EXPANDED_W + 24
         w = max(w, min(need, g.width() - 16))
         if self._centre_size != (w, panel_h):
             self._centre_size = (w, panel_h)
             self.center.setFixedSize(w, panel_h)
-        return w, h
+        return w, panel_h
 
     def open_centre(self):
         """Second panel, below the card with a visible gap."""
@@ -407,9 +484,10 @@ class IslandWindow(QWidget):
         self.centre_open = True
         w, h = self._centre_geometry()
         self.center.show()
+        self._update_rail()
         self.center.sync_config(self.cfg)
         x, y = self._centre_origin(w, h)
-        self._animate_to_rect(QRect(x, y, w, h))
+        self._animate_to_rect(QRect(x, y, w, h), hide_card=False)
         self.set_emotion("35")
 
     def close_centre(self):
@@ -417,22 +495,24 @@ class IslandWindow(QWidget):
             return
         self.centre_open = False
         self.center.hide()
+        self._update_rail()
+        w, h = self._expanded_size()
         self.card.setFixedWidth(EXPANDED_W)
-        self._animate_to(EXPANDED_W, EXPANDED_H,
+        self._animate_to(w, h,
                          anchor_corner=(self.cfg.get("mode") == "corner"))
 
     def _centre_origin(self, w: int, h: int) -> tuple[int, int]:
         """Keep the wider panel on screen, biased to the current position."""
         g = self._screen_geo()
         cur = self.geometry()
-        x = min(max(cur.x(), g.x()), g.x() + max(0, g.width() - w))
-        y = min(max(cur.y(), g.y()), g.y() + max(0, g.height() - h))
+        x = self._clamp(cur.x(), g.x(), w, g.width())
+        y = self._clamp(cur.y(), g.y(), h, g.height())
         return x, y
 
     def _centre_config_changed(self):
         self.cfg = cfgmod.load()
 
-    def _animate_to_rect(self, rect: QRect):
+    def _animate_to_rect(self, rect: QRect, hide_card: bool = True):
         cur = self.geometry()
         # Stop any in-flight animation so two flights never fight.
         try:
@@ -445,16 +525,27 @@ class IslandWindow(QWidget):
         self.setMaximumSize(16777215, 16777215)
         self._target_geom = QRect(rect)
         self._anim = QPropertyAnimation(self, b"geometry", self)
-        self._anim.setDuration(200)
+        self._anim.setDuration(ANIM_MS)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.setStartValue(cur)
         self._anim.setEndValue(QRect(rect))
         self._anim.finished.connect(self._apply_mode_visual)
-        QTimer.singleShot(400, self._apply_mode_visual)
-        # Collapse: hide the card upfront so its layout can't re-grow
-        # the window mid-flight; the capsule stretches then shrinks.
-        self.card.setVisible(False)
-        self.collapsed.setVisible(True)
+        QTimer.singleShot(ANIM_SETTLE_MS, self._apply_mode_visual)
+        # Show the pair that belongs to the target state, upfront, so the
+        # flight grows out of the right widget.
+        #
+        # Collapsing hides the card early on purpose: its layout would
+        # otherwise re-grow the window mid-flight and the capsule would
+        # stretch. This branch used to run unconditionally, so opening the
+        # control centre hid the card for the whole flight and flashed an
+        # empty capsule back at the end.
+        if hide_card:
+            self.card.setVisible(False)
+            self.collapsed.setVisible(True)
+        elif self.expanded:
+            self.collapsed.setVisible(False)
+            self.card.setVisible(True)
+            self.clearMask()
         self._anim.start()
 
     def _animate_to(self, w: int, h: int, anchor_corner: bool):
@@ -463,8 +554,6 @@ class IslandWindow(QWidget):
         if not anchor_corner:
             # keep top-center-ish: grow downward, keep horizontal center
             x = cur.x() + (cur.width() - w) // 2
-            if self.cfg.get("mode") == "island" and not self.expanded:
-                pass
         else:
             g = self._screen_geo()
             m = int(self.cfg.get("corner_margin", 0) or 0)
@@ -477,36 +566,10 @@ class IslandWindow(QWidget):
                 x, y = g.x() + m, g.y() + g.height() - h - m
             else:
                 x, y = g.x() + g.width() - w - m, g.y() + g.height() - h - m
-        # Stop any in-flight animation so two flights never fight.
-        try:
-            if getattr(self, "_anim", None) is not None and self._anim.state():
-                self._anim.stop()
-        except Exception:
-            pass
-        # Release fixed-size clamps so the flight can interpolate freely.
-        self.setMinimumSize(0, 0)
-        self.setMaximumSize(16777215, 16777215)
-        self._target_geom = QRect(x, y, w, h)
-        self._anim = QPropertyAnimation(self, b"geometry", self)
-        self._anim.setDuration(200)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.setStartValue(cur)
-        self._anim.setEndValue(QRect(x, y, w, h))
-        self._anim.finished.connect(self._apply_mode_visual)
-        # Safety: if the animation never finishes (e.g. offscreen/platform
-        # quirk), still settle on the target visuals.
-        QTimer.singleShot(400, self._apply_mode_visual)
-        # show target widgets upfront for smooth growth
-        if self.expanded:
-            self.collapsed.setVisible(False)
-            self.card.setVisible(True)
-            self.clearMask()
-        else:
-            # Collapse: hide the card upfront so its layout can't re-grow
-            # the window mid-flight; the capsule stretches then shrinks.
-            self.card.setVisible(False)
-            self.collapsed.setVisible(True)
-        self._anim.start()
+        # One animation path for both helpers — they were near-identical
+        # copies, and the divergence is what produced the centre flash.
+        self._animate_to_rect(QRect(x, y, w, h),
+                              hide_card=not self.expanded)
 
     # ---------- mouse: drag to move, click to expand ----------
     def mousePressEvent(self, event):  # noqa: N802
@@ -562,6 +625,11 @@ class IslandWindow(QWidget):
         super().keyPressEvent(event)
 
     # ---------- timers ----------
+    def clock_text(self) -> str:
+        """The one clock. Three surfaces used to format independently, so the
+        corner wedge and the capsule could disagree for up to a second."""
+        return datetime.now().strftime("%H:%M")
+
     def _tick_clock(self):
         now = datetime.now()
         s = now.strftime("%H:%M")
@@ -687,19 +755,24 @@ class IslandWindow(QWidget):
 
     def _centre_palette(self) -> dict:
         """Map the active theme onto the palette the painted widgets want."""
-        t = themesmod._resolve(self.cfg.get("theme", "black"))
+        t = themesmod.resolve(self.cfg.get("theme", "black"))
+        hexc = colorsmod.to_hex
         return {
-            "ink": _qt_color(t.get("text", "#f2efe8")),
-            "sub": _qt_color(t.get("subtext", "#a8a49d")),
-            "muted": _qt_color(t.get("muted", "#6f6c68")),
-            "text": _qt_color(t.get("text", "#f2efe8")),
-            "accent": _qt_color(t.get("accent", "#59d98c")),
-            "track": _qt_color(t.get("tab", "#17171b")),
-            "bg": _qt_color(t.get("card_bg", "#0d0d10")),
-            "pane": _qt_color(t.get("pane", "#101013")),
-            "btn": _qt_color(t.get("btn", "#1d1d22")),
-            "btn_border": _qt_color(t.get("btn_border", "#2c2c33")),
-            "off": "#55555c",
+            "ink": hexc(t.get("text", "#f2efe8")),
+            "sub": hexc(t.get("subtext", "#a8a49d")),
+            "muted": hexc(t.get("muted", "#6f6c68")),
+            "text": hexc(t.get("text", "#f2efe8")),
+            "accent": hexc(t.get("accent", "#59d98c")),
+            "track": hexc(t.get("tab", "#17171b")),
+            "bg": hexc(t.get("card_bg", "#0d0d10")),
+            "pane": hexc(t.get("pane", "#101013")),
+            "btn": hexc(t.get("btn", "#1d1d22")),
+            "btn_border": hexc(t.get("btn_border", "#2c2c33")),
+            # Disabled ink was a hardcoded grey living outside the theme
+            # system, so it never matched any theme.
+            "off": hexc(t.get("muted", "#6f6c68")),
+            "warn": hexc(t.get("accent", "#59d98c")),
+            "error": colorsmod.ERROR.hex(),
         }
 
     # ---------- menu ----------
@@ -806,11 +879,11 @@ class IslandWindow(QWidget):
         g = self._screen_geo()
         x = g.x() + (g.width() - COLLAPSED_ISLAND_W) // 2
         self.cfg["mode"] = "island"
-        self.cfg["island_x"], self.cfg["island_y"] = x, g.y() + 8
+        self.cfg["island_x"], self.cfg["island_y"] = x, g.y() + ISLAND_TOP_INSET
         cfgmod.save(self.cfg)
         if self.expanded:
             self.collapse()
-        self.setGeometry(x, g.y() + 8, COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H)
+        self.setGeometry(x, g.y() + ISLAND_TOP_INSET, COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H)
         self._apply_mode_visual()
 
     def closeEvent(self, event):  # noqa: N802

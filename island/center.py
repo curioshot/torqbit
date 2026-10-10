@@ -31,13 +31,24 @@ from PySide6.QtWidgets import (
 from . import config as cfgmod
 from . import feeds as feedsmod
 from . import icons as iconsmod
+from . import probe as probes
 from . import sensors as sensorsmod
 from . import sysctl
 from .feedcar import FeedCarousel
 from .glass import GlassPanel
+from .todo import TodoColumn, CALENDAR_W
 from .widgets import VerticalSlider, RingGauge, ToggleDot
 
 GAP = 8
+POLL_MS = 1500
+# Toggle indicators change at human speed; re-reading NetworkManager
+# and pactl on every tick is what made this panel feel heavy.
+TOGGLE_EVERY_N_TICKS = 2
+# How long to wait before re-probing capabilities after a failed write.
+RECAP_DELAY_MS = 4000
+# Reading back a write lands within this tolerance of what we asked for.
+VERIFY_TOLERANCE = 0.06
+GAUGE_W = 196
 
 # icon, short label, tooltip name, capability key, control kind
 TOGGLES = [
@@ -47,9 +58,28 @@ TOGGLES = [
     ("bt", "BT", "Bluetooth", "bluetooth", "bluetooth"),
     ("dnd", "DND", "Do not disturb", "dnd", "dnd"),
     ("mic", "Mic", "Mute microphone", "volume", "micmute"),
+    ("speaker", "Speaker", "Mute audio output", "volume", "spkmute"),
     ("moon", "Theme", "Light / dark theme", None, "theme"),
     ("lock", "Lock", "Lock screen", "lock", "lock"),
+    ("power", "Blank", "Blank the screen", "blank", "blank"),
+    ("thermo", "Night", "Night light / blue-light filter", "nightlight",
+     "nightlight"),
+    ("party", "Play", "Play or pause the current track", "playback",
+     "playback"),
+    ("speed", "Shot", "Save a screenshot", "screenshot", "screenshot"),
 ]
+
+# The rail is a 4-column grid. Grid spacing and dot size are chosen so a
+# dot never wraps to the next row: RAIL_W must be >= 4*DOT_W + 3*DOT_GAP.
+RAIL_COLUMNS = 4
+DOT_W, DOT_H = 40, 52
+DOT_GAP = 4
+SLIDER_W = 48
+RAIL_W = max(96, RAIL_COLUMNS * DOT_W + (RAIL_COLUMNS - 1) * DOT_GAP)
+
+
+def _rows_for(count: int, columns: int = RAIL_COLUMNS) -> int:
+    return (count + columns - 1) // columns
 
 DARK_THEMES = {"black", "liquid", "minimal"}
 LIGHT_THEMES = {"white"}
@@ -146,46 +176,48 @@ class FeedPickerDialog(QDialog):
 
 
 class Rail(QWidget):
-    """The 1-inch column on the left of the card.
-
-    Sliders on top, toggle buttons underneath, and — deliberately — **no
-    panel of its own**, so the controls sit straight on the wallpaper rather
-    than inside a second box.
+    """The control column on the left: sliders on top, a 4-column grid of
+    toggles underneath, and — deliberately — **no panel of its own**, so the
+    controls sit straight on the wallpaper rather than inside a second box.
     """
 
-    WIDTH = 96
+    WIDTH = RAIL_W
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(self.WIDTH)
+        self.setFixedWidth(RAIL_W)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        lay.setSpacing(10)
 
         self.s_mic = VerticalSlider("mic", "Mic")
         self.s_out = VerticalSlider("speaker", "Output")
         self.s_bright = VerticalSlider("sun", "Light")
         bars = QHBoxLayout()
         bars.setContentsMargins(0, 0, 0, 0)
-        bars.setSpacing(0)
+        bars.setSpacing(8)
         for s in (self.s_mic, self.s_out, self.s_bright):
+            s.setFixedWidth(SLIDER_W)
             bars.addWidget(s)
         lay.addLayout(bars, 1)
 
         self.toggles: dict[str, ToggleDot] = {}
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(4)
-        # two per row: three would be 3x58 in a 96px column, one per row
-        # would make eight rows and a very long strip.
+        grid.setSpacing(DOT_GAP)
         for i, (icon_name, label, full, cap, kind) in enumerate(TOGGLES):
             d = ToggleDot(icon_name, label)
             d.tip = full
             self.toggles[kind] = d
-            grid.addWidget(d, i // 2, i % 2)
+            grid.addWidget(d, i // RAIL_COLUMNS, i % RAIL_COLUMNS)
+        # Fill any trailing slots so the grid keeps its width even when a
+        # future release ships fewer toggles than the row count implies.
+        for slot in range(len(TOGGLES),
+                          RAIL_COLUMNS * _rows_for(len(TOGGLES))):
+            grid.addWidget(QWidget(), slot // RAIL_COLUMNS,
+                           slot % RAIL_COLUMNS)
         lay.addLayout(grid, 0)
-        self.resize(self.WIDTH, 420)
 
     def apply_palette(self, pal: dict) -> None:
         for w in (self.s_mic, self.s_out, self.s_bright):
@@ -203,29 +235,34 @@ class ControlCenter(GlassPanel):
     """
 
     themeToggleRequested = Signal(str)
+    toastRequested = Signal(str)
 
     def __init__(self, on_config_changed=None, parent=None):
         super().__init__(parent)
         self._on_cfg = on_config_changed
         self._pal = {}
         self._theme = "black"
-        self._last_action = 0.0
 
         root = QHBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(16)
+        root.setSpacing(20)
 
-        # ---- the rail: outside this panel, beside the card ----
+        # ---- the rail: outside this panel, in the row beside it ----
         self.rail = Rail(self)
 
         # ---- feeds: continuous scroll, one feed at a time ----
         self.feeds = FeedCarousel(on_config_changed, self)
         root.addWidget(self.feeds, 1)
 
-        # ---- right: gauge ----
+        # ---- gauge ----
         self.gauge = RingGauge()
-        self.gauge.setFixedWidth(196)
+        self.gauge.setFixedWidth(GAUGE_W)
         root.addWidget(self.gauge)
+
+        # ---- calendar / to-dos, as the last column ----
+        self.calendar = TodoColumn(on_config_changed, self)
+        self.calendar.setFixedWidth(CALENDAR_W)
+        root.addWidget(self.calendar)
 
         # convenience aliases: the rail's controls, reachable from here
         self.s_mic = self.rail.s_mic
@@ -242,20 +279,29 @@ class ControlCenter(GlassPanel):
         # ---- polling ----
         self._poll = QTimer(self)
         self._poll.timeout.connect(self.tick)
-        self._poll.setInterval(1500)
+        self._poll.setInterval(POLL_MS)
 
-        self.backend = sysctl.Backend.get()
-        self.caps = self.backend.caps()
+        # The backend probes five subsystems, several of them with 3-4s
+        # subprocess timeouts. Probing that on the GUI thread froze startup
+        # for seconds on an unhappy machine, so it goes through the worker.
+        self.backend = probes.run(sysctl.Backend.get, timeout=15.0) \
+            or sysctl.Backend.get()
+        self.caps = probes.run(self.backend.caps, timeout=8.0) \
+            or self.backend.caps()
+        self._toggle_tick = 0
         self._apply_caps()
 
     # ------------------------------------------------------------ setup
     def sync_config(self, cfg: dict) -> None:
         self._theme = cfg.get("theme", "black")
         self.feeds.sync_config(cfg.get("centre", {}))
-        want = cfg.get("centre", {}).get("enabled", True)
-        if want and self.isVisible():
+        # `show()` already fired showEvent -> start(). Calling start() again
+        # here, plus an unconditional forced refresh, meant opening the
+        # centre cost three full metric refreshes and two toggle refreshes —
+        # roughly fourteen synchronous subprocess spawns in one event-loop
+        # turn, because `force` cleared the TTL caches each time.
+        if cfg.get("centre", {}).get("enabled", True) and not self._poll.isActive():
             self.start()
-        self._refresh_metrics(force=True)
 
     def _apply_caps(self) -> None:
         c = self.caps
@@ -283,15 +329,11 @@ class ControlCenter(GlassPanel):
         self.gauge.apply_palette(pal)
         self.feeds.apply_palette(pal)
         self.rail.apply_palette(pal)
-        # Repaint ourselves as a glass shell so the panel is visibly its own
-        # container rather than floating on the wallpaper.
-        from PySide6.QtGui import QColor
-        bg = QColor(pal.get("bg", "#0d0d10"))
-        border = QColor(pal.get("btn_border", "#2c2c33"))
-        try:
-            self.set_glass(bg, bg, border, 1.0, 20, False, False)
-        except Exception:
-            pass
+        self.calendar.apply_palette(pal)
+        # Frameless: the panel paints nothing, so the RSS list, the gauge and
+        # the calendar sit directly on the screen with no container behind
+        # them. This call used to paint a glass shell here.
+        self.set_frameless(True)
 
     # ------------------------------------------------------------ life
     def start(self) -> None:
@@ -318,33 +360,34 @@ class ControlCenter(GlassPanel):
         self._refresh_metrics()
         # Toggle indicators change at human speed; re-reading NetworkManager
         # and pactl on every tick is what made this panel feel heavy.
-        self._toggle_tick = getattr(self, "_toggle_tick", 0) + 1
-        if self._toggle_tick % 2 == 0:
+        self._toggle_tick += 1
+        if self._toggle_tick % TOGGLE_EVERY_N_TICKS == 0:
             self._refresh_toggles()
 
     def _refresh_metrics(self, force: bool = False) -> None:
         b = self.backend
         if force:
-            b.audio._cache.clear()
-            b.network._cache.clear()
+            probes.run(lambda: (b.audio._cache.clear(),
+                                b.network._cache.clear()))
         if self.caps["volume"]["available"] and self.s_mic.isVisible():
-            v = b.audio.volume("source", fresh=force)
-            if v is not None and not self.s_mic._press:
+            # One worker hop for both volumes: pactl costs ~50ms a spawn and
+            # this runs every 1.5s. It blocks the GUI thread, so it must not.
+            vols = probes.run(lambda: (b.audio.volume("source", fresh=force),
+                                       b.audio.volume("sink", fresh=force)),
+                              timeout=4.0, default=(None, None))
+            v, o = vols
+            if v is not None and not self.s_mic.is_dragging():
                 self.s_mic.set_value(v)
-            o = b.audio.volume("sink", fresh=force)
-            if o is not None and not self.s_out._press:
+            if o is not None and not self.s_out.is_dragging():
                 self.s_out.set_value(o)
-        if self.caps["brightness"]["available"] and not self.s_bright._press:
-            self.s_bright.set_value(b.brightness.get())
+        if self.caps["brightness"]["available"] and not self.s_bright.is_dragging():
+            level = probes.run(b.brightness.get, timeout=4.0)
+            if level is not None:
+                self.s_bright.set_value(level)
 
         down, up = b.speed.sample()
         temp = sensorsmod.get_cpu_temp()
-        try:
-            import psutil
-            ram = psutil.virtual_memory().percent
-            load = psutil.cpu_percent(interval=None)
-        except Exception:
-            ram = load = 0.0
+        ram, load = probes.run(self._host_load, timeout=3.0, default=(0.0, 0.0))
 
         self.gauge.set_metric("TEMP", temp or 0.0, 100.0, "%.0f°C")
         self.gauge.set_metric("RAM", ram, 100.0, "%.0f%%")
@@ -352,43 +395,112 @@ class ControlCenter(GlassPanel):
         head = f"{temp:.0f}°C" if temp else "—"
         self.gauge.set_center(head, f"↓ {sysctl.format_bps(down)}")
 
-    def _refresh_toggles(self) -> None:
-        b = self.backend
+    @staticmethod
+    def _host_load() -> tuple[float, float]:
         try:
-            self.toggles["airplane"].set_on(not (b.network.radios_enabled() or False))
-            self.toggles["link"].set_on(bool(b.network.link_up()))
-            if self.caps["wifi"]["available"]:
-                self.toggles["wifi"].set_on(bool(b.network.wifi_enabled()))
-            if self.caps["bluetooth"]["available"]:
-                self.toggles["bluetooth"].set_on(bool(b.bluetooth.powered()))
-            if self.caps["dnd"]["available"]:
-                self.toggles["dnd"].set_on(bool(b.session.dnd()))
-            if self.caps["volume"]["available"]:
-                self.toggles["micmute"].set_on(bool(b.audio.muted("source")))
-            self.toggles["theme"].set_on(self._theme in DARK_THEMES)
+            import psutil
+            return psutil.virtual_memory().percent, psutil.cpu_percent(
+                interval=None)
         except Exception:
-            pass
+            return 0.0, 0.0
+
+    def _refresh_toggles(self) -> None:
+        """Read every toggle's real state in ONE worker hop.
+
+        Read individually this was up to seven `nmcli`/`bluetoothctl`/
+        `pactl` spawns per tick, each 50-150ms, all on the GUI thread. One
+        hop keeps the stall off the event loop entirely.
+        """
+        states = probes.run(self._read_toggle_states, timeout=6.0)
+        if not states:
+            return
+        for kind, on in states.items():
+            dot = self.toggles.get(kind)
+            if dot is not None:
+                dot.set_on(bool(on))
+
+    def _read_toggle_states(self) -> dict:
+        b = self.backend
+        c = self.caps
+        out: dict[str, bool] = {}
+        try:
+            out["airplane"] = not (b.network.radios_enabled() or False)
+            out["link"] = bool(b.network.link_up())
+            if c["wifi"]["available"]:
+                out["wifi"] = bool(b.network.wifi_enabled())
+            if c["bluetooth"]["available"]:
+                out["bluetooth"] = bool(b.bluetooth.powered())
+            if c["dnd"]["available"]:
+                out["dnd"] = bool(b.session.dnd())
+            if c["volume"]["available"]:
+                out["micmute"] = bool(b.audio.muted("source"))
+                out["spkmute"] = bool(b.audio.muted("sink"))
+            if c["nightlight"]["available"]:
+                out["nightlight"] = bool(b.night_light.enabled())
+            if c["playback"]["available"]:
+                playing = b.playback.playing()
+                if playing is not None:
+                    out["playback"] = playing
+        except Exception:
+            return {}
+        # Theme is local state, not a system read — always applied.
+        out["theme"] = self._theme in DARK_THEMES
+        return out
 
     # ------------------------------------------------------------ actions
     def _set_audio(self, which: str, value: float) -> None:
         kind = "source" if which == "mic" else "sink"
         slider = self.s_mic if which == "mic" else self.s_out
         if self.backend.audio.set_volume(kind, value):
-            self._last_action = time.monotonic()
             return
         # The device took the command but did not apply it — PipeWire does
-        # exactly this on a suspended source. Say so rather than pretend.
-        slider.set_control_enabled(
-            False,
-            "this device accepted the command but did not change volume; "
-            "it may have no live capture or playback stream")
+        # exactly this on a suspended source, and it is routine. Say so, and
+        # try again shortly; latching the control off here left it dead for
+        # the rest of the session after one transient hiccup.
+        slider.flash_error()
+        slider.setToolTip(
+            "This device accepted the command but did not change volume.\n"
+            "It may have no live capture or playback stream right now.\n"
+            "The bot will try again on the next change.")
+        self._schedule_recap()
+
+    def _schedule_recap(self) -> None:
+        """Re-apply capabilities shortly after a failed write."""
+        t = getattr(self, "_recap", None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._recap_caps)
+            self._recap = t
+        if not t.isActive():
+            t.start(RECAP_DELAY_MS)
+
+    def _recap_caps(self) -> None:
+        """Re-probe after a transient failure, rather than staying disabled."""
+        try:
+            self.backend.reprobe()
+            self.caps = self.backend.caps()
+            self._apply_caps()
+        except Exception:
+            pass
 
     def _set_brightness(self, value: float) -> None:
         if self.backend.brightness.set(value):
-            self._last_action = time.monotonic()
             return
-        self.s_bright.set_control_enabled(
-            False, "this display rejected a brightness change")
+        self.s_bright.flash_error()
+        self.s_bright.setToolTip(
+            "This display rejected a brightness change.")
+        self._schedule_recap()
+
+    def _toggle_speaker_mute(self) -> bool | None:
+        """Flip output mute. `audio.muted` already handles sinks; this
+        exists so a failure surfaces as None (unchanged) rather than a
+        silently wrong state."""
+        cur = self.backend.audio.muted("sink", fresh=True)
+        if cur is None:
+            return None
+        want = not cur
+        return want if self.backend.audio.set_muted("sink", want) else None
 
     def _toggle(self, kind: str, dot: ToggleDot) -> None:
         b = self.backend
@@ -422,17 +534,43 @@ class ControlCenter(GlassPanel):
                 ok = r is not None
                 if r is not None:
                     dot.set_on(bool(r))
+            elif kind == "spkmute":
+                r = self._toggle_speaker_mute()
+                ok = r is not None
+                if r is not None:
+                    dot.set_on(bool(r))
             elif kind == "theme":
                 self.themeToggleRequested.emit(
                     "white" if self._theme in DARK_THEMES else "black")
                 dot.set_on(self._theme not in DARK_THEMES)
                 return
             elif kind == "lock":
-                ok = b.session.lock()
-                dot.set_busy(True)
-                QTimer.singleShot(1400, lambda: dot.set_busy(False))
+                ok = probes.run(b.session.lock, timeout=4.0, default=False)
                 if ok:
+                    # The screen locks, so the panel goes with it; there is
+                    # no point animating a busy state nobody will see.
                     return
+            elif kind == "blank":
+                ok = probes.run(b.blank_screen.blank, timeout=6.0,
+                                default=False)
+                # Nothing to show afterwards: the screen is off.
+                return
+            elif kind == "nightlight":
+                r = probes.run(b.night_light.toggle, timeout=5.0)
+                ok = r is not None
+                if r is not None:
+                    dot.set_on(bool(r))
+            elif kind == "playback":
+                r = probes.run(b.playback.play_pause, timeout=5.0)
+                ok = r is not None
+                if r is not None:
+                    dot.set_on(bool(r))
+            elif kind == "screenshot":
+                ok = probes.run(b.screenshot.grab, timeout=12.0,
+                                default=False)
+                if ok:
+                    self.toastRequested.emit(
+                        f"Screenshot saved to {b.screenshot._dir}")
             else:
                 ok = False
         except Exception:

@@ -1,4 +1,6 @@
-
 PySide6==6.9.2
 psutil
 python-xlib>=0.33
+
+# Tests only — the app itself never imports pytest.
+pytest>=8.0

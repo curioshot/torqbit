@@ -26,6 +26,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (QObject, QTimer, QUrl, Signal, Slot)
@@ -50,6 +51,65 @@ PAGE_SETTINGS = (
 
 POLL_MS = 1500
 CONNECT_TIMEOUT_MS = 4000
+RECONNECT_MIN_MS = 2000
+RECONNECT_MAX_MS = 30000
+
+# X keysym -> DOM KeyboardEvent.code. The bot's key capture records keysyms
+# (that is what XTest needs); the injected page matches on `code`.
+_ARROW_KEYSYMS = {
+    0xFF51: "ArrowLeft", 0xFF52: "ArrowUp",
+    0xFF53: "ArrowRight", 0xFF54: "ArrowDown",
+    0xFF08: "Backspace", 0xFF09: "Tab", 0xFF0D: "Enter", 0xFF1B: "Escape",
+    0xFFFF: "Delete", 0xFF7F: "NumLock", 0xFF50: "Home", 0xFF57: "End",
+    0xFF55: "PageUp", 0xFF56: "PageDown", 0xFF63: "Insert",
+}
+_F1_KEYSYMS = {0xFFBE + i: f"F{i + 1}" for i in range(12)}   # 0xFFBE..0xFFC9
+_PUNCT_CODES = {
+    ";": "Semicolon", ":": "Semicolon", "=": "Equal", "+": "Equal",
+    ",": "Comma", "<": "Comma", "-": "Minus", "_": "Minus",
+    ".": "Period", ">": "Period", "/": "Slash", "?": "Slash",
+    "`": "Backquote", "~": "Backquote", "[": "BracketLeft",
+    "{": "BracketLeft", "]": "BracketRight", "}": "BracketRight",
+    "\\": "Backslash", "|": "Backslash", "'": "Quote", '"': "Quote",
+}
+
+
+def keysym_to_code(keysym, label: str = "") -> str:
+    """X keysym (or a display label) -> DOM `KeyboardEvent.code`.
+
+    Returns a sane default rather than an empty string: an unmatched binding
+    would otherwise silently disable the page-side shortcut.
+    """
+    try:
+        sym = int(keysym)
+    except (TypeError, ValueError):
+        sym = 0
+    if sym in _ARROW_KEYSYMS:
+        return _ARROW_KEYSYMS[sym]
+    if sym in _F1_KEYSYMS:
+        return _F1_KEYSYMS[sym]
+    # ASCII letters/digits: the keysym value is the character itself.
+    if 0x20 <= sym <= 0x7E:
+        ch = chr(sym)
+        if ch == " ":
+            # DOM `code` for space is "Space", not " ".
+            return "Space"
+        if ch.isdigit():
+            return f"Digit{ch}"
+        if ch.isalpha():
+            return f"Key{ch.upper()}"
+        return _PUNCT_CODES.get(ch, "")
+    # Fall back to whatever the capture UI displayed.
+    ch = (label or "").strip()
+    if len(ch) == 1:
+        if ch == " ":
+            return "Space"
+        if ch.isdigit():
+            return f"Digit{ch}"
+        if ch.isalpha():
+            return f"Key{ch.upper()}"
+        return _PUNCT_CODES.get(ch, "")
+    return "KeyS" if sym == 83 else "KeyW"
 
 
 class Transport:
@@ -254,6 +314,10 @@ class ReelsBridge(QObject):
     def state(self) -> dict:
         return dict(self._state)
 
+    def is_live(self) -> bool:
+        """True when a transport exists and its socket is actually up."""
+        return bool(self.transport and self.transport.is_open() and self.transport.ready)
+
     # ------------------------------------------------------------------ config
     def configure(self, cfg: dict) -> None:
         """Receive the `instagram` config block."""
@@ -263,9 +327,24 @@ class ReelsBridge(QObject):
 
     def _page_config(self) -> dict:
         out = {k: self._config[k] for k in PAGE_SETTINGS if k in self._config}
-        # The bot's key bindings are stored as X keysyms for XTest; the page
-        # wants DOM `code` values. Map the common ASCII case.
+        # The bot stores its key bindings as X keysyms, because that is what
+        # the XTest fallback needs to synthesize them. The page listens for
+        # DOM `code` values. These used to be copied straight across under
+        # mismatched names, so every captured key was silently dropped and the
+        # page kept its own hardcoded defaults.
+        out.update(self._key_config())
         return out
+
+    def _key_config(self) -> dict:
+        cfg = self._config
+        return {
+            "nextKey": keysym_to_code(cfg.get("next_keysym", 83),
+                                      cfg.get("next_label", "S")),
+            "prevKey": keysym_to_code(cfg.get("prev_keysym", 87),
+                                      cfg.get("prev_label", "W")),
+            "nextLabel": str(cfg.get("next_label") or "S"),
+            "prevLabel": str(cfg.get("prev_label") or "W"),
+        }
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, family: str, port: int) -> None:
@@ -553,6 +632,8 @@ class ReelsService(QObject):
         self._config: dict = {}
         self._busy_until = 0.0
         self._launched_by_us: set[str] = set()
+        self._retry_at = 0.0
+        self._retry_delay = RECONNECT_MIN_MS
 
     # ------------------------------------------------------------------ config
     def sync_config(self, cfg: dict) -> None:
@@ -560,13 +641,23 @@ class ReelsService(QObject):
         self.bridge.configure(self._config)
 
     def _on_page_settings(self, patch: dict) -> None:
-        """The pill changed a setting: persist through the normal config path."""
+        """The pill changed a setting: persist through the normal config path.
+
+        The CDP binding is callable by *any* script in the controlled page —
+        including an ad network's or an extension's — so this is a trust
+        boundary. config.apply_page_patch allow-lists the three display-only
+        keys the pill actually owns and clamps each one.
+        """
         try:
             from . import config as cfg
+            accepted = cfg.apply_page_patch(patch)
+            if accepted is None:
+                return
             full = cfg.load()
-            full.setdefault("instagram", {}).update(patch)
-            cfg.save(full)
             self._config = full["instagram"]
+            # The bridge keeps its own copy; without this the next
+            # _push_settings() would overwrite the user's page change.
+            self.bridge.configure(self._config)
         except Exception as e:
             self.message.emit(f"could not save page setting: {e}")
 
@@ -611,13 +702,18 @@ class ReelsService(QObject):
         res = browsers.install_shim(self.family)
         if not res.get("ok"):
             return res.get("error", "shim install failed")
+        if res.get("already"):
+            return f"The wrapper for {self.family} was already installed"
         return f"Installed {res['path']} — every {self.family} launch is now instrumented"
 
     def uninstall_shim(self) -> str:
         res = browsers.uninstall_shim(self.family)
         if not res.get("ok"):
             return res.get("error", "shim remove failed")
-        return f"Removed the wrapper for {self.family}"
+        removed = res.get("removed") or []
+        if not removed:
+            return f"There was no wrapper for {self.family} to remove"
+        return f"Removed {len(removed)} wrapper(s) for {self.family}"
 
     # ------------------------------------------------------------------ poll
     def tick(self) -> None:
@@ -629,6 +725,7 @@ class ReelsService(QObject):
         port = browsers.current_port(self.family)
         if port is None:
             self.bridge.stop()
+            self._retry_at = 0.0
             self.statusChanged.emit(self.state())
             return
         # Only (re)connect when the browser's debug port actually changed.
@@ -637,6 +734,22 @@ class ReelsService(QObject):
         if self.bridge.port != port:
             self.bridge.start(self.family, port)
             self.bridge.begin_polling()
+            self._retry_at = 0.0
+            return
+        # Same port, but the socket may have died on its own (tab closed,
+        # session expired, Chromium restarted in place). Only a port change
+        # used to re-dial, which left the bridge stuck forever.
+        if self.bridge.is_live():
+            self._retry_at = 0.0
+            return
+        now = time.monotonic()
+        if now < self._retry_at:
+            return
+        delay = self._retry_delay
+        self._retry_delay = min(RECONNECT_MAX_MS,
+                                max(RECONNECT_MIN_MS, delay * 2))
+        self._retry_at = now + delay
+        self.bridge.start(self.family, port)
 
     # ------------------------------------------------------------------ control
     def next_reel(self, callback=None) -> None:
@@ -654,8 +767,12 @@ class ReelsService(QObject):
             return
         # Fallback: synthesise the key into the focused Instagram window.
         from . import services as svc
-        sym = int(self._config.get("next_keysym" if forward else "prev_keysym",
-                                   83 if forward else 87))
+        default = 83 if forward else 87
+        try:
+            sym = int(self._config.get("next_keysym" if forward
+                                       else "prev_keysym", default))
+        except (TypeError, ValueError):
+            sym = default      # config can be hand-edited to anything
         ok, msg = svc.send_reel_key(sym)
         cb(("x11", {"ok": ok, "detail": msg}), None)
 

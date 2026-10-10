@@ -253,7 +253,14 @@ def launch(family: str, url: str = REELS_URL, app_mode: bool = True,
 
     port = free_port(DEFAULT_PORTS.get(family, 0))
     prof = profile_dir(family)
-    prof.mkdir(parents=True, exist_ok=True)
+    # This profile holds live Instagram session cookies — a default-umask
+    # 0755 directory lets any local process read them.
+    prof.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        if (prof.stat().st_mode & 0o077) != 0:
+            prof.chmod(0o700)
+    except OSError:
+        pass
     if family == "firefox":
         # The Remote Agent is off by default; prefs are the only way to turn it on.
         _write_firefox_prefs(prof, port)
@@ -268,7 +275,7 @@ def launch(family: str, url: str = REELS_URL, app_mode: bool = True,
         return {"ok": False, "error": f"could not start {binary}: {e}"}
 
     try:
-        cfgmod.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        cfgmod.ensure_dir()
         port_file(family).write_text(str(port), encoding="utf-8")
     except Exception:
         pass
@@ -390,7 +397,32 @@ def install_shim(family: str) -> dict:
     existing = find_shim(family)
     if existing:
         return {"ok": True, "already": True, "path": str(existing)}
+
     target = _shim_dir() / os.path.basename(binary)
+
+    # Refuse to write over a file that is not ours. A personal launcher in
+    # ~/.local/bin is a normal setup and ticking this box must not destroy it.
+    if target.exists():
+        if SHIM_MARKER in _safe_read(target):
+            return {"ok": True, "already": True, "path": str(target)}
+        return {"ok": False, "path": str(target),
+                "error": f"{target} already exists and is not a bot-island "
+                         f"wrapper — remove it yourself or rename it, then "
+                         f"tick this again"}
+
+    # Refuse to point the shim at itself. If `binary` resolves to a file
+    # inside the shim dir under the same name we are about to write, the
+    # wrapper's `exec` line would target its own path: every launch of this
+    # browser would fork and exec itself forever.
+    try:
+        same_file = (Path(binary).resolve() == target.resolve())
+    except OSError:
+        same_file = False
+    if same_file:
+        return {"ok": False, "error": f"{binary} resolves to the shim path "
+                                      f"itself; install the real browser in a "
+                                      f"different directory first"}
+
     flags = " ".join(instrument_args(family))
     script = "\n".join([
         "#!/usr/bin/env bash",
@@ -403,8 +435,13 @@ def install_shim(family: str) -> dict:
     ])
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(script, encoding="utf-8")
-        target.chmod(0o755)
+        # Create with the final mode rather than write-then-chmod, so the
+        # wrapper is never briefly present with the wrong permissions.
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(script)
+    except FileExistsError:
+        return {"ok": True, "already": True, "path": str(target)}
     except Exception as e:
         return {"ok": False, "error": f"could not write {target}: {e}"}
     _invalidate_shim_cache()
@@ -412,18 +449,38 @@ def install_shim(family: str) -> dict:
 
 
 def uninstall_shim(family: str) -> dict:
-    p = find_shim(family)
-    if not p:
-        return {"ok": True, "already": False}
-    if SHIM_MARKER not in _safe_read(p):
-        return {"ok": False,
-                "error": f"{p} is not a bot-island shim — left alone"}
+    """Remove every bot-island wrapper for `family`.
+
+    Reports `removed` honestly so the UI never claims it deleted something
+    it did not.
+    """
+    removed = []
+    d = _shim_dir()
     try:
-        p.unlink()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        entries = sorted(d.iterdir())
+    except Exception:
+        entries = []
+    for p in entries:
+        if not _plausible_shim(p):
+            continue
+        body = _safe_read(p)
+        if SHIM_MARKER not in body or _shim_family(body) != family:
+            continue
+        try:
+            p.unlink()
+            removed.append(str(p))
+        except Exception:
+            pass
+    if not removed:
+        return {"ok": True, "already": False, "removed": []}
     _invalidate_shim_cache()
-    return {"ok": True, "already": False, "path": str(p)}
+    return {"ok": True, "already": False, "removed": removed,
+            "path": removed[0]}
+
+
+def shim_installed(family: str) -> bool:
+    """Whether a wrapper for `family` is on disk right now."""
+    return find_shim(family) is not None
 
 
 def shim_status() -> dict:

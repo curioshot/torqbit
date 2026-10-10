@@ -226,8 +226,7 @@ class FeedCarousel(QWidget):
         """[{name, items, url}] in feed order, one block per feed."""
         out = []
         for feed in self.reader.feeds():
-            hit = self.reader._cache.get(feed["url"])
-            items = hit[1] if hit else []
+            items = self.reader.feed_items(feed["url"])
             out.append({"name": feed["name"], "url": feed["url"],
                         "items": items[:feedsmod.MAX_ITEMS_PER_FEED]})
         return out

@@ -14,6 +14,7 @@ except Exception:
     _HAS_WEBENGINE = False
 
 from island.window import IslandWindow
+from island import probe
 
 
 def _single_instance_guard(app: QApplication):
@@ -44,6 +45,9 @@ def main(argv=None) -> int:
     app.setApplicationName("bot-island")
     app.setOrganizationName("bot-island")
     app.setQuitOnLastWindowClosed(True)
+    # The probe worker owns a QThread; without this it is still running when
+    # the interpreter tears down and Qt aborts.
+    app.aboutToQuit.connect(probe.shutdown)
     _single_instance_guard(app)
     w = IslandWindow()
     w.show()

@@ -7,7 +7,7 @@ a fallback for browsers the bot cannot attach to.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGridLayout,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import browsers
+from . import colors as colorsmod
 from . import config as cfgmod
 from . import icons as iconsmod
 from . import services as svc
@@ -24,25 +25,93 @@ from .reels import ReelsService
 # The Service tab spawns subprocesses (NetworkManager, pactl, spotify), so it
 # must not poll while hidden, and must not poll faster than it needs to.
 POLL_MS = 2500
-
-
-def _dot(color: str) -> str:
-    return (f"background: {color}; border-radius: 5px; min-width: 10px;"
-            f" min-height: 10px; max-width: 10px; max-height: 10px;")
+# How long a notice stays up. Long enough to actually read: errors used to
+# be written into a status label that the 2.5s poll overwrote, so the user
+# had under two seconds to notice a permission-denied.
+NOTICE_MS = 9000
+NOTICE_ERROR_MS = 20000
 
 
 class _BackHeader(QWidget):
+    """Title bar for a sub-page, with Back bound to Esc as well as the button.
+
+    Leaving a sub-page used to require hitting a 64px target with a mouse.
+    """
+
     def __init__(self, title: str, on_back, parent=None):
         super().__init__(parent)
+        self._on_back = on_back
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         back = QPushButton("Back")
         back.setFixedWidth(64)
+        back.setAccessibleName(f"Back to Service from {title}")
+        back.setShortcut(QKeySequence(Qt.Key_Escape))
         back.clicked.connect(on_back)
         lay.addWidget(back)
         t = QLabel(title)
         t.setStyleSheet("font-size: 15px; font-weight: 700;")
         lay.addWidget(t, 1)
+
+
+class Notice(QWidget):
+    """A dismissible message strip.
+
+    Every user-visible outcome — a failed launch, a wrapper installed, a
+    refused overwrite — goes through here instead of a label that the next
+    poll cycle silently replaces. Severity is carried by an icon *and*
+    text, not colour alone.
+    """
+
+    _ICONS = {"info": "", "ok": "✓", "error": "⚠"}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(6)
+        self._icon = QLabel()
+        self._icon.setFixedWidth(14)
+        self._icon.setAlignment(Qt.AlignCenter)
+        self._text = QLabel()
+        self._text.setWordWrap(True)
+        self._text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        close = QPushButton("✕")
+        close.setFixedSize(22, 22)
+        close.setFlat(True)
+        close.setAccessibleName("Dismiss this message")
+        close.clicked.connect(self.hide)
+        lay.addWidget(self._icon)
+        lay.addWidget(self._text, 1)
+        lay.addWidget(close, 0, Qt.AlignTop)
+        self.hide()
+
+    def show_message(self, text: str, kind: str = "info") -> None:
+        if not text:
+            return
+        kind = kind if kind in self._ICONS else "info"
+        self._icon.setText(self._ICONS[kind])
+        self._text.setText(text)
+        colour = {
+            "error": colorsmod.ERROR.name(),
+            "ok": colorsmod.OK.name(),
+        }.get(kind, "palette(mid)")
+        self.setStyleSheet(
+            f"Notice {{ background: rgba(255, 255, 255, 0.06);"
+            f" border: 1px solid {colour}; border-radius: 8px; }}"
+            f"Notice QLabel {{ color: {colour}; font-size: 11px; }}"
+            f"Notice QPushButton {{ color: {colour}; }}"
+            if kind != "info" else
+            "Notice { background: rgba(255, 255, 255, 0.06);"
+            " border: 1px solid palette(mid); border-radius: 8px; }"
+            "Notice QLabel { font-size: 11px; }")
+        self._text.setAccessibleName(text)
+        self.show()
+        self._timer.start(NOTICE_ERROR_MS if kind == "error" else NOTICE_MS)
 
 
 class InstagramPage(QWidget):
@@ -82,8 +151,15 @@ class InstagramPage(QWidget):
         top.addWidget(self.dot)
         self.status = QLabel("starting…")
         self.status.setWordWrap(True)
+        self.status.setAccessibleName("Instagram status")
         top.addWidget(self.status, 1)
         body.addLayout(top)
+
+        # Sticky, dismissible notices. The status label above is live state
+        # and is rewritten on every poll; anything the user needs to *read*
+        # belongs here instead.
+        self.notice = Notice()
+        body.addWidget(self.notice)
 
         # ---- browser -------------------------------------------------
         br = QGridLayout()
@@ -212,8 +288,14 @@ class InstagramPage(QWidget):
             self.browser.addItem(b["label"], b["family"])
         idx = self.browser.findData(current)
         if idx < 0 and found:
+            # The saved family is not installed. Show what we do have *and
+            # persist it — previously the fallback lived only in this local
+            # variable, so the combo and config disagreed all session.
             idx = 0
             current = found[0]["family"]
+            self._patch({"browserFamily": current})
+            if self.svc:
+                self.svc.set_family(current)
         if idx >= 0:
             self.browser.setCurrentIndex(idx)
         self.browser.setEnabled(bool(found))
@@ -232,6 +314,13 @@ class InstagramPage(QWidget):
         self.shim.blockSignals(True)
         self.shim.setChecked(installed)
         self.shim.blockSignals(False)
+        self.shim.setToolTip(
+            ("Remove the ~/.local/bin wrapper so %s launches normally again"
+             % fam) if installed else
+            ("Wrap %s in ~/.local/bin so every launch comes up instrumented. "
+             "This opens the debug port for all browsing in that browser, not "
+             "just Reels. Bot Island will not overwrite an existing file "
+             "there." % fam))
 
     # ----- actions -----
     def _save_service(self):
@@ -253,12 +342,12 @@ class InstagramPage(QWidget):
         fam = self.browser.currentData() or "chromium"
         msg = (self.svc.uninstall_shim() if self.shim.isChecked()
                else self.svc.install_shim())
-        self.status.setText(msg)
+        self.say(msg)
         self._sync_shim()
 
     def _open(self):
         if self.svc:
-            self.status.setText(self.svc.open_instagram())
+            self.say(self.svc.open_instagram())
 
     def _save_box(self, key: str):
         self._patch({key: self.boxes[key].isChecked()})
@@ -280,6 +369,9 @@ class InstagramPage(QWidget):
         if event.key() in (Qt.Key_Escape, Qt.Key_Enter, Qt.Key_Return):
             self._capturing = None
             self._load_all()
+            # Consume it: otherwise the key that cancels a capture also
+            # reaches the parent widget and does something else there.
+            event.accept()
             return
         sym, label = self._qt_to_sym(event)
         if sym is None:
@@ -288,6 +380,7 @@ class InstagramPage(QWidget):
         self._capturing = None
         self._patch({f"{which}_keysym": sym, f"{which}_label": label})
         self._load_all()
+        event.accept()
 
     @classmethod
     def _qt_to_sym(cls, event) -> tuple[int | None, str]:
@@ -310,19 +403,26 @@ class InstagramPage(QWidget):
 
         def done(result, error):
             origin, payload = result if result else ("x11", {})
-            ok = bool(payload.get("ok")) if isinstance(payload, dict) else False
+            payload = payload if isinstance(payload, dict) else {}
+            ok = bool(payload.get("ok"))
             if error:
-                self.status.setText(f"Could not send {which}: {error}")
+                self.say(f"Could not send {which}: {error}", "error")
             elif origin == "native":
-                self.status.setText(
-                    f"{which.capitalize()} reel (in-page)"
-                    if ok else f"Bot could not turn: {payload}")
+                if ok:
+                    self.say(f"{which.capitalize()} reel (in-page)", "ok")
+                else:
+                    self.say(f"Bot could not turn: "
+                             f"{payload.get('detail', payload)}", "error")
             else:
-                self.status.setText(
-                    f"Sent {which} key ({payload.get('detail', '')})"
-                    if ok else "No Instagram window found")
+                self.say(f"Sent {which} key ({payload.get('detail', '')})"
+                         if ok else "No Instagram window found",
+                         "ok" if ok else "error")
 
         fn(done)
+
+    def say(self, text: str, kind: str = "info") -> None:
+        """Surface a message the user actually needs to read."""
+        self.notice.show_message(text, kind)
 
     def refresh(self):
         s = self._cfg()
@@ -338,6 +438,9 @@ class InstagramPage(QWidget):
 
 
 class SpotifyPage(QWidget):
+    # Emitted from the lyrics worker thread; delivered on the GUI thread.
+    _lyricsReady = Signal(object, object)
+
     def __init__(self, on_back, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
@@ -354,8 +457,12 @@ class SpotifyPage(QWidget):
         top.addWidget(self.dot)
         self.status = QLabel("starting…")
         self.status.setWordWrap(True)
+        self.status.setAccessibleName("Spotify status")
         top.addWidget(self.status, 1)
         lay.addLayout(top)
+
+        self.notice = Notice()
+        lay.addWidget(self.notice)
 
         self.track = QLabel("No track")
         self.track.setStyleSheet("font-size: 14px; font-weight: 700;")
@@ -386,6 +493,8 @@ class SpotifyPage(QWidget):
         self._track_key: str | None = None
         self._times: list = []
         self._pending: dict | None = None
+        self._pending_key: str | None = None
+        self._lyricsReady.connect(self._store_pending)
         self._load_all()
 
     def _cfg(self) -> dict:
@@ -407,9 +516,10 @@ class SpotifyPage(QWidget):
         cfgmod.save(cfg)
         if on and not svc.spotify_process_running():
             if svc.launch_spotify():
-                self.status.setText("Starting Spotify…")
+                self.say("Starting Spotify…", "ok")
             else:
-                self.status.setText("Spotify app not found.")
+                self.say("Spotify app not found — install Spotify or start "
+                         "it, then try again.", "error")
         if not on and svc.overlay_running():
             svc.overlay_cmd("stop")  # service owns the overlay; leave none behind
         self.refresh()
@@ -421,24 +531,48 @@ class SpotifyPage(QWidget):
         self.refresh()
 
     def _drain_pending(self):
-        if self._pending is not None:
-            rec, key = self._pending, self._track_key
-            self._pending = None
-            if rec and rec.get("mode") == "synced":
-                self._times = rec.get("times", [])
-                texts = rec.get("texts", [])
-                self.lyrics.clear()
-                for line in texts:
-                    self.lyrics.addItem(line or "·")
-            elif rec and rec.get("mode") == "plain":
-                self._times = []
-                self.lyrics.clear()
-                for line in (rec.get("texts") or ["(static lyrics)"]):
-                    self.lyrics.addItem(line or "·")
-            else:
-                self._times = []
-                self.lyrics.clear()
-                self.lyrics.addItem("(no lyrics found)")
+        """Apply the lyrics the worker thread delivered.
+
+        The record carries the track key it was requested for. A slow fetch
+        for track A can land after the user has already skipped to track B;
+        without this guard it would overwrite B's lyrics with A's.
+        """
+        if self._pending is None:
+            return
+        rec, key = self._pending, self._pending_key
+        self._pending = None
+        self._pending_key = None
+        if key is not None and key != self._track_key:
+            return                       # stale: the user moved on
+        mode = (rec or {}).get("mode")
+        self.lyrics.clear()
+        if mode == "synced":
+            self._times = rec.get("times", [])
+            for line in rec.get("texts", []):
+                self.lyrics.addItem(line or "·")
+        elif mode == "plain":
+            self._times = []
+            for line in (rec.get("texts") or ["(static lyrics)"]):
+                self.lyrics.addItem(line or "·")
+        elif mode == "instrumental":
+            self._times = []
+            self.lyrics.addItem("(instrumental)")
+        elif mode:
+            self._times = []
+            self.lyrics.addItem(f"({mode} lyrics)")
+        else:
+            self._times = []
+            self.lyrics.addItem("(no lyrics found)")
+
+    def say(self, text: str, kind: str = "info") -> None:
+        self.notice.show_message(text, kind)
+
+    def _hint_no_mpris(self) -> None:
+        """Explain *why* there is no track, instead of leaving a dead dot."""
+        self.say("Spotify is running but is not publishing an MPRIS track. "
+                 "Check Settings → Spotify → 'Expose Spotify over MPRIS' "
+                 "(or Preferences → Allow Spotify to be controlled by other "
+                 "apps on the Flatpak build).", "error")
 
     def refresh(self):
         self._drain_pending()
@@ -472,7 +606,10 @@ class SpotifyPage(QWidget):
         if not snap:
             self.dot.setStyleSheet(_dot("#55555c"))
             if svc.spotify_process_running():
+                # Running but no MPRIS track: the usual cause is Spotify's
+                # own MPRIS setting being off, or the Flatpak/AppImage build.
                 self.status.setText("Spotify runs but exposes no track yet.")
+                self._hint_no_mpris()
             else:
                 self.status.setText("Spotify not running.")
             return
@@ -490,14 +627,19 @@ class SpotifyPage(QWidget):
             svc.fetch_lyrics_async(
                 snap.get("title", ""), snap.get("artist", ""),
                 snap.get("album", ""), snap.get("duration_ms", 0),
-                lambda rec: self._store_pending(rec))
+                lambda rec, k=key: self._lyricsReady.emit(rec, k))
         else:
             idx = svc.line_index_at(self._times, snap.get("progress_ms", 0))
             if 0 <= idx < self.lyrics.count():
                 self.lyrics.setCurrentRow(idx)
 
-    def _store_pending(self, rec):
+    def _store_pending(self, rec, key):
+        """Runs on the GUI thread via a queued connection from
+        `_lyricsReady`. Previously the worker thread wrote `self._pending`
+        directly: a data race against the poll loop, and a stale fetch could
+        land after the user had already skipped to the next track."""
         self._pending = rec
+        self._pending_key = key
 
 
 class ServiceTab(QWidget):
@@ -512,7 +654,9 @@ class ServiceTab(QWidget):
         # One shared Reels controller: browser launch, page bridge and the
         # X11 key fallback live behind a single object the page polls.
         self.reels = ReelsService(self)
-        self.reels.message.connect(lambda m: None)
+        # This was `lambda m: None` — the one and only error channel the
+        # Reels bridge had, wired to a no-op.
+        self.reels.message.connect(self._on_reels_message)
 
         home = QWidget()
         grid = QGridLayout(home)
@@ -559,6 +703,14 @@ class ServiceTab(QWidget):
     def hideEvent(self, event):  # noqa: N802
         super().hideEvent(event)
         self._t.stop()
+
+    def _on_reels_message(self, message: str) -> None:
+        """Surface a Reels-side error on whichever page is on screen."""
+        for page in (self.insta, self.spot):
+            try:
+                page.say(message, "error")
+            except Exception:
+                pass
 
     def open(self, key: str):
         self.stack.setCurrentIndex(1 if key == "instagram" else 2)

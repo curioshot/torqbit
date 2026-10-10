@@ -21,7 +21,22 @@ from PySide6.QtWidgets import QWidget
 
 
 class GlassPanel(QWidget):
-    def __init__(self, parent=None):
+    """A structural panel that, by default, paints nothing.
+
+    Originally this drew a frosted rounded rect — translucent fill, 1px
+    border, specular gloss — and relied on the compositor's "blur behind"
+    to do the frosting. The flagship look was therefore only ever really
+    present under KCompositor, and degraded to a flat translucent box
+    everywhere else.
+
+    The UI is now deliberately frameless: containers, buttons and controls
+    sit directly on the screen with no background and no border. The class
+    is kept as the single layout shell the window builds from (it owns the
+    translucent-background attribute), but it paints nothing.
+    `set_glass()` is retained for any caller that wants the old chrome back.
+    """
+
+    def __init__(self, parent=None, frameless: bool = True):
         super().__init__(parent)
         self._top = QColor(13, 13, 16, 246)
         self._bottom = QColor(13, 13, 16, 246)
@@ -30,7 +45,19 @@ class GlassPanel(QWidget):
         self._radius = 20
         self._gloss = False
         self._rim = False
+        self._frameless = bool(frameless)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        if self._frameless:
+            # Nothing to draw, so skip the backing store entirely.
+            self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+    def set_frameless(self, on: bool = True) -> None:
+        self._frameless = bool(on)
+        self.setAttribute(Qt.WA_NoSystemBackground, self._frameless)
+        self.update()
+
+    def is_frameless(self) -> bool:
+        return self._frameless
 
     def set_glass(self, top: QColor, bottom: QColor, border: QColor,
                   border_w: float = 1.0, radius: int = 20,
@@ -45,6 +72,8 @@ class GlassPanel(QWidget):
         self.update()
 
     def paintEvent(self, event):  # noqa: N802
+        if self._frameless:
+            return
         w, h = self.width(), self.height()
         if w < 4 or h < 4:
             return

@@ -23,10 +23,44 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 # --------------------------------------------------------------- helpers
+
+
+def _atomic_write(path: Path, text: str) -> bool:
+    """Replace a file's contents without ever truncating it in place.
+
+    Used for files the bot does not own outright — notably the Plasma
+    desktop layout. A partial write there costs the user their whole
+    desktop arrangement, so: temp file in the same directory, fsync, then
+    rename, which is atomic on every POSIX filesystem.
+    """
+    try:
+        path = Path(path)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".bot-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            # Keep the mode the user already had; Plasma writes 0600.
+            try:
+                os.chmod(tmp, path.stat().st_mode & 0o7777)
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return True
+    except Exception:
+        return False
 
 
 def _run(cmd, timeout=2.5) -> tuple[int, str]:
@@ -74,7 +108,10 @@ class TTLCache:
         if key not in self._v:
             return None
         if time.monotonic() - self._t.get(key, 0.0) > self.ttl:
+            # Drop the timestamp too: only the value used to be evicted, so
+            # _t grew without bound for the life of the process.
             self._v.pop(key, None)
+            self._t.pop(key, None)
             return None
         return self._v[key]
 
@@ -263,6 +300,7 @@ class Audio:
         self.kind = self.NONE
         self.reason = "no audio control backend found"
         self._pw_nodes: dict[str, int] = {}
+        self._pw_classes: dict[str, int] = {}
         self._pw_ts = 0.0
         self._cache = TTLCache(3.0)
         self.probe()
@@ -309,11 +347,17 @@ class Audio:
         return rc == 0
 
     # -- pw-cli fallback -------------------------------------------------
-    def _pw_nodes_now(self) -> dict[str, int]:
+    def _pw_nodes_now(self) -> tuple[dict[str, int], dict[str, int]]:
+        """(node name -> id, class -> id) from `pw-cli ls Node`.
+
+        These were two different key namespaces crammed into one dict, so a
+        node literally called "Sink" shadowed the real class entry.
+        """
+        by_name: dict[str, int] = {}
+        by_class: dict[str, int] = {}
         if time.monotonic() - self._pw_ts < 5.0 and self._pw_nodes:
-            return self._pw_nodes
+            return self._pw_nodes, self._pw_classes
         rc, out = _run(["pw-cli", "ls", "Node"], timeout=4.0)
-        nodes: dict[str, int] = {}
         if rc == 0:
             nid = None
             for line in out.splitlines():
@@ -323,21 +367,27 @@ class Audio:
                     continue
                 m = re.search(r'node\.name\s*=\s*"([^"]+)"', line)
                 if m and nid is not None:
-                    nodes[m.group(1)] = nid
+                    by_name[m.group(1)] = nid
                 m = re.search(r'media\.class\s*=\s*"Audio/(Sink|Source)"', line)
                 if m and nid is not None:
-                    nodes.setdefault(m.group(1), nid)
-        self._pw_nodes = nodes
+                    by_class.setdefault(m.group(1), nid)
+        self._pw_nodes, self._pw_classes = by_name, by_class
         self._pw_ts = time.monotonic()
-        return nodes
+        return by_name, by_class
 
     def _pw_first(self, cls: str) -> int | None:
-        nodes = self._pw_nodes_now()
-        for name, nid in nodes.items():
-            if name.startswith("alsa_output") or cls == "Sink":
-                if cls == "Sink":
+        """A node id for the requested class, preferring real hardware.
+
+        The old condition was `if name.startswith("alsa_output") or cls ==
+        "Sink"`, so asking for a Sink made the guard unconditionally true and
+        returned whichever node happened to come first — often a Source.
+        """
+        by_name, by_class = self._pw_nodes_now()
+        if cls == "Sink":
+            for name, nid in by_name.items():
+                if name.startswith("alsa_output"):
                     return nid
-        return nodes.get(cls)
+        return by_class.get(cls)
 
     def _pw_vol(self, nid: int) -> float | None:
         rc, out = _run(["pw-cli", "get-node-volume", str(nid)])
@@ -498,7 +548,11 @@ class Network:
             return None
         states = [ln.split()[-1].lower() for ln in out.splitlines() if ln.strip()]
         states = [s for s in states if s in ("enabled", "disabled", "missing")]
-        val = bool(states) and all(s != "disabled" for s in states)
+        # `missing` means there is no such radio on this machine. Treating it
+        # as enabled made the airplane dot read "on" when there was nothing
+        # to switch off, so only real radios count.
+        real = [s for s in states if s in ("enabled", "disabled")]
+        val = bool(real) and all(s != "disabled" for s in real)
         self._cache.put("radios", val)
         return val
 
@@ -631,7 +685,13 @@ class Session:
         return bool(m and m.group(1).lower() == "true")
 
     def set_dnd(self, on: bool) -> bool:
-        """Write the Plasma key in place, preserving every other line."""
+        """Write the Plasma key in place, preserving every other line.
+
+        This rewrites the user's *entire* desktop layout file, so it has to
+        be crash-safe: write to a sibling temp file and rename, never
+        truncate in place. A full disk or an OOM kill mid-write would
+        otherwise destroy every panel and widget arrangement.
+        """
         if not self.can_dnd:
             return False
         try:
@@ -639,43 +699,48 @@ class Session:
         except Exception:
             return False
         entry = f"org.kde.plasma.donotdisturb={'true' if on else 'false'}"
-        pat = re.compile(r"^(\s*)org\.kde\.plasma\.donotdisturb\s*=\s*(true|false)\s*$",
-                         re.M | re.I)
+        # Note the [^\S\r\n] classes rather than \s: \s matches \n, so the
+        # old pattern's trailing \s*$ swallowed the line's terminating
+        # newline and the replacement merged this entry into the next line,
+        # corrupting the INI.
+        pat = re.compile(
+            r"^([^\S\r\n]*)org\.kde\.plasma\.donotdisturb"
+            r"[^\S\r\n]*=[^\S\r\n]*(?:true|false)[^\S\r\n]*$",
+            re.M | re.I)
         if pat.search(text):
             new = pat.sub(lambda m: f"{m.group(1)}{entry}", text)
         elif "[DoNotDisturb]" in text:
-            new = re.sub(r"(\[DoNotDisturb\]\s*\n)",
+            new = re.sub(r"(\[DoNotDisturb\][^\S\r\n]*\r?\n)",
                          lambda m: m.group(1) + entry + "\n", text, count=1)
         else:
             new = text.rstrip("\n") + "\n\n[DoNotDisturb]\n" + entry + "\n"
         if new == text:
             return False
+        if not _atomic_write(self.DND_FILE, new):
+            return False
+        # Read back: confirm the key actually landed where we intended.
         try:
-            self.DND_FILE.write_text(new, encoding="utf-8")
+            return self.dnd() is bool(on)
         except Exception:
             return False
-        # Ask plasmashell to re-read its settings.
-        _run(["qdbus6", "org.kde.plasmashell", "/MainApplication",
-              "org.kde.PlasmaShell.reparseConfiguration"], timeout=2.0)
-        return True
 
 
 # --------------------------------------------------------------- net speed
 
 
 class NetSpeed:
-    """Throughput from /proc/net/dev deltas on the primary interface."""
+    """Total throughput from /proc/net/dev deltas across every interface.
+
+    Summing is deliberate: a VPN, a docker bridge or a container veth can
+    carry most of the real traffic, so "the primary interface" would
+    under-report. The docstring used to claim a single interface while the
+    code summed all of them.
+    """
 
     def __init__(self):
         self._last: tuple[float, tuple[int, int]] | None = None
         self.down_bps = 0.0
         self.up_bps = 0.0
-
-    def _iface(self) -> str | None:
-        for dev in _read_net_dev():
-            if dev not in ("lo",):
-                return dev
-        return None
 
     def sample(self) -> tuple[float, float]:
         now = time.monotonic()
@@ -721,6 +786,205 @@ def _read_net_dev() -> list[tuple[str, int, int]]:
     return out
 
 
+# ---------------------------------------------------------- new actions
+# These back the newer rail toggles. Each follows the same contract as the
+# rest of the module: probe once, expose `available` + `reason`, and never
+# raise — a control that cannot act says so rather than silently no-op.
+
+
+class Screenshot:
+    """Grab the screen to a file. Tool preference order, first one wins."""
+
+    NONE = "none"
+    CANDIDATES = (
+        ("spectacle", ["spectacle", "-b", "-n", "-o"]),
+        ("grim", ["grim"]),
+        ("gnome-screenshot", ["gnome-screenshot", "-f"]),
+        ("maim", ["maim"]),
+        ("scrot", ["scrot"]),
+    )
+
+    def __init__(self):
+        self.kind = self.NONE
+        self.reason = "no screenshot tool found"
+        self._argv: list[str] | None = None
+        self._dir = Path.home() / "Pictures"
+        for name, argv in self.CANDIDATES:
+            if _have(name):
+                self._argv = argv
+                self.kind = name
+                self.reason = ""
+                break
+
+    @property
+    def available(self) -> bool:
+        return self._argv is not None
+
+    def grab(self, directory: str | Path | None = None) -> bool:
+        """Capture the screen. Fire and forget: this is a UI action, not a
+        read, so it never goes through the read-back verification path."""
+        if not self._argv:
+            return False
+        out_dir = Path(directory) if directory else self._dir
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return False
+        stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        suffix = {"grim": ".png", "scrot": ".png", "maim": ".png"}.get(
+            self.kind, ".jpg")
+        path = out_dir / f"screenshot_{stamp}{suffix}"
+        argv = list(self._argv) + [str(path)]
+        rc, _ = _run(argv, timeout=8.0)
+        return rc == 0 and path.exists()
+
+
+class BlankScreen:
+    """Blank the display (or suspend). Never a lock — Lock already does
+    that; this is the 'turn the screen off' action."""
+
+    NONE = "none"
+    POWER_OFF = "logind"
+    DPMS = "xset"
+
+    def __init__(self):
+        self.kind = self.NONE
+        self.reason = "no way to blank the screen"
+        if _have("systemctl"):
+            self.kind = self.POWER_OFF
+            self.reason = ""
+        elif _have("xset"):
+            self.kind = self.DPMS
+            self.reason = ""
+
+    @property
+    def available(self) -> bool:
+        return self.kind != self.NONE
+
+    def blank(self) -> bool:
+        if self.kind == self.POWER_OFF:
+            rc, _ = _run(["systemctl", "suspend"], timeout=5.0)
+            return rc == 0
+        if self.kind == self.DPMS:
+            rc, _ = _run(["xset", "dpms", "force", "off"], timeout=3.0)
+            return rc == 0
+        return False
+
+
+class NightLight:
+    """Blue-light filter. KDE exposes it over D-Bus; elsewhere fall back to
+    a gamma ramp, which is not the same thing but is close enough to be
+    useful and is honestly labelled as such."""
+
+    NONE = "none"
+    PLASMA = "plasma"
+    GAMMA = "gammastep"
+
+    DBUS_SERVICE = "org.kde.plasma.nightlight"
+    DBUS_PATH = "/org/kde/plasma/nightlight"
+    DBUS_IFACE = "org.kde.plasma.nightlight"
+
+    def __init__(self):
+        self.kind = self.NONE
+        self.reason = "no night light backend"
+        self._on = False
+        self._cache = TTLCache(ttl=5.0)
+        if _have("qdbus6") or _have("qdbus"):
+            rc, out = _run([_qdbus(), self.DBUS_SERVICE, self.DBUS_PATH],
+                           timeout=3.0)
+            if rc == 0 and "nightlight" in out.lower():
+                self.kind = self.PLASMA
+                self.reason = ""
+                return
+        if _have("gammastep"):
+            self.kind = self.GAMMA
+            self.reason = "using a gamma ramp (not a real blue-light filter)"
+
+    @property
+    def available(self) -> bool:
+        return self.kind != self.NONE
+
+    def enabled(self, fresh: bool = False) -> bool:
+        if not self.available:
+            return False
+        if self.kind == self.GAMMA:
+            return self._on
+        hit = None if fresh else self._cache.get("on")
+        if hit is not None:
+            return bool(hit)
+        rc, out = _run([_qdbus(), self.DBUS_SERVICE, self.DBUS_PATH,
+                        self.DBUS_IFACE, "state"], timeout=3.0)
+        val = rc == 0 and out.strip().lower() in ("true", "1")
+        self._cache.put("on", val)
+        return val
+
+    def set(self, on: bool) -> bool:
+        if not self.available:
+            return False
+        if self.kind == self.GAMMA:
+            argv = ["gammastep", "1.0"] if on else ["gammastep", "1.0", "1.0"]
+            rc, _ = _run(argv, timeout=3.0)
+            self._on = bool(rc == 0)
+            return self._on
+        rc, _ = _run([_qdbus(), self.DBUS_SERVICE, self.DBUS_PATH,
+                      self.DBUS_IFACE, "setCurrentState",
+                      "true" if on else "false"], timeout=3.0)
+        return rc == 0
+
+    def toggle(self) -> bool | None:
+        want = not self.enabled(fresh=True)
+        return want if self.set(want) else None
+
+
+def _qdbus() -> str:
+    """KDE 6 ships qdbus6; older systems only have qdbus."""
+    return "qdbus6" if _have("qdbus6") else "qdbus"
+
+
+class Playback:
+    """MPRIS media keys for whatever player is running.
+
+    Deliberately not Spotify-only: MPRIS is the common interface, and the
+    bot already speaks it for the lyrics panel.
+    """
+
+    NONE = "none"
+
+    def __init__(self):
+        self.kind = self.NONE
+        self.reason = "no media player exposing MPRIS"
+        if not (_have("playerctl") or _have("busctl")):
+            return
+        from . import services as svc
+        if svc._is_spotify_bus("org.mpris.MediaPlayer2.spotify"):
+            return
+        self.kind = "playerctl" if _have("playerctl") else "busctl"
+        self.reason = ""
+
+    @property
+    def available(self) -> bool:
+        return self.kind != self.NONE
+
+    def playing(self) -> bool | None:
+        if not self.available:
+            return None
+        rc, out = _run(["playerctl", "status"], timeout=3.0)
+        if rc != 0:
+            return None
+        return out.strip().lower() == "playing"
+
+    def play_pause(self) -> bool | None:
+        """Flip playback. Returns the new state, or None when it failed."""
+        if not self.available:
+            return None
+        if self.kind == "playerctl":
+            rc, _ = _run(["playerctl", "play-pause"], timeout=4.0)
+            if rc != 0:
+                return None
+            return not bool(self.playing())
+        return None
+
+
 # --------------------------------------------------------------- facade
 
 
@@ -736,6 +1000,10 @@ class Backend:
         self.bluetooth = Bluetooth()
         self.session = Session()
         self.speed = NetSpeed()
+        self.screenshot = Screenshot()
+        self.blank_screen = BlankScreen()
+        self.night_light = NightLight()
+        self.playback = Playback()
 
     @classmethod
     def get(cls) -> "Backend":
@@ -787,6 +1055,26 @@ class Backend:
                 "available": self.session.can_dnd,
                 "kind": "plasma" if self.session.can_dnd else "none",
                 "reason": self.session.dnd_reason,
+            },
+            "screenshot": {
+                "available": self.screenshot.available,
+                "kind": self.screenshot.kind,
+                "reason": self.screenshot.reason,
+            },
+            "blank": {
+                "available": self.blank_screen.available,
+                "kind": self.blank_screen.kind,
+                "reason": self.blank_screen.reason,
+            },
+            "nightlight": {
+                "available": self.night_light.available,
+                "kind": self.night_light.kind,
+                "reason": self.night_light.reason,
+            },
+            "playback": {
+                "available": self.playback.available,
+                "kind": self.playback.kind,
+                "reason": self.playback.reason,
             },
         }
 

@@ -4,8 +4,12 @@ All icons use `currentColor` so the active theme tints them.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
+from functools import lru_cache
+
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import (QIcon, QImage, QPainter, QPixmap, QGuiApplication)
+
+from . import colors as colorsmod
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -231,18 +235,59 @@ _SVGS = {
 SHUFFLE_SENTINEL = "__shuffle__"
 
 
+@lru_cache(maxsize=512)
+def _rasterize(name: str, size: int, dpr: float, rgb: tuple[int, int, int]):
+    """SVG bytes -> QPixmap, memoised.
+
+    Rasterising an SVG means parsing its XML, allocating a QImage and
+    uploading a texture. That used to happen on every paintEvent — three
+    sliders at 25 Hz plus eight toggles is eleven full rasterisations per
+    frame. The cache is keyed by device pixel ratio, so a screen change
+    still produces a correctly-sized bitmap.
+    """
+    data = (_SVGS[name]
+            .replace("currentColor", "#%02x%02x%02x" % rgb)
+            .encode("utf-8"))
+    px = max(1, int(round(size * dpr)))
+    img = QImage(px, px, QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    renderer = QSvgRenderer(data)
+    if not renderer.isValid():
+        return None
+    p = QPainter(img)
+    try:
+        renderer.render(p, QRectF(0, 0, px, px))
+    finally:
+        p.end()
+    pm = QPixmap.fromImage(img)
+    # Without this the 1x bitmap gets upscaled and every icon is soft on a
+    # HiDPI display, while the QPainter-drawn parts stay crisp.
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
+def _dpr() -> float:
+    try:
+        screen = QGuiApplication.primaryScreen()
+        return float(screen.devicePixelRatio()) if screen else 1.0
+    except Exception:
+        return 1.0
+
+
 def pixmap(name: str, size: int = 16, color: str = "#f2efe8") -> QPixmap | None:
-    """Render an icon to a pixmap, or None if SVG rendering is unavailable."""
+    """Render an icon to a pixmap, or None if SVG rendering is unavailable.
+
+    `color` may be any CSS spelling — including ``rgba(...)``, which Qt's SVG
+    renderer silently refuses to draw at all.
+    """
     if not _SVG_OK or name not in _SVGS:
         return None
     try:
-        data = _SVGS[name].replace("currentColor", color).encode("utf-8")
-        img = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
-        img.fill(Qt.transparent)
-        p = QPainter(img)
-        QSvgRenderer(data).render(p)
-        p.end()
-        return QPixmap.fromImage(img)
+        col = colorsmod.to_qcolor(color, "#f2efe8")
+        if not col.isValid():
+            return None
+        return _rasterize(name, int(size), _dpr(),
+                          (col.red(), col.green(), col.blue()))
     except Exception:
         return None
 

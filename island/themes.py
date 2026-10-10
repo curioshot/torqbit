@@ -114,7 +114,8 @@ def available() -> list[tuple[str, str, str]]:
     return [(k, _LABELS[k], _DESCS[k]) for k in THEME_ORDER]
 
 
-def _resolve(name: str) -> dict:
+def resolve(name: str) -> dict:
+    """Public: the control centre needs the same resolved palette."""
     if name == "system":
         return _system_theme()
     return dict(_THEMES.get(name, _THEMES["black"]))
@@ -191,7 +192,7 @@ def apply_theme(window, name: str) -> str:
 
     if name not in THEME_ORDER:
         name = "black"
-    t = _resolve(name)
+    t = resolve(name)
     g = t.get("glass", {})
 
     def qc(key, fallback=(13, 13, 16, 246)):
@@ -201,17 +202,12 @@ def apply_theme(window, name: str) -> str:
         except Exception:
             return QColor(*fallback)
 
-    # Outer shells paint themselves (guaranteed rounded corners).
-    top, bottom = qc("top"), qc("bottom")
-    border = qc("border", (46, 46, 53, 255))
-    bw = float(g.get("bw", 1.0))
-    radius = int(g.get("radius", 20))
-    gloss, rim = bool(g.get("gloss")), bool(g.get("rim"))
+    # Containers are frameless by design. Kept as an explicit switch so the
+    # old chrome is one flag away if it is ever wanted back.
     try:
-        window.collapsed.set_glass(top, bottom, border, bw, radius, gloss, rim)
-        window.card.set_glass(top, bottom, border, bw, radius, gloss, rim)
-        window.content.set_glass(top, bottom, border, bw, max(8, radius - 6),
-                                 gloss, rim)
+        window.collapsed.set_frameless(True)
+        window.card.set_frameless(True)
+        window.content.set_frameless(True)
     except Exception:
         pass
     window.mini_time.setStyleSheet(
@@ -238,46 +234,61 @@ def apply_theme(window, name: str) -> str:
         f"background: transparent; color: {t['muted']}; font-size: 10px;"
     )
 
+    # Frameless: every control paints its own content and nothing else.
+    # No borders, no fills, no rounded boxes on the containers themselves —
+    # the components sit directly on the screen.
     window.tabs.setStyleSheet(
-        f"QTabWidget::pane {{ border: 1px solid {t['card_border']};"
-        f" border-radius: 10px; background: {t['pane']}; }}"
-        f"QTabBar::tab {{ background: {t['tab']}; color: {t['subtext']};"
-        f" padding: 4px 4px; font-size: 10px; border-top-left-radius: 8px;"
-        f" border-top-right-radius: 8px; margin: 2px; }}"
-        f"QTabBar::tab:selected {{ background: {t['tab_sel']}; color: {t['text']}; }}"
+        f"QTabWidget::pane {{ border: none; background: transparent; }}"
+        f"QTabBar::tab {{ background: transparent; color: {t['muted']};"
+        f" padding: 5px 9px; font-size: 11px; border: none;"
+        f" border-bottom: 2px solid transparent; }}"
+        f"QTabBar::tab:selected {{ color: {t['text']};"
+        f" border-bottom: 2px solid {t['accent']}; }}"
+        f"QTabBar::tab:hover:!selected {{ color: {t['subtext']}; }}"
         f"QLabel {{ background: transparent; color: {t['text']}; border: none; }}"
-        f"QPushButton {{ background: {t['btn']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 8px; padding: 6px 2px; color: {t['text']}; font-size: 11px; }}"
-        f"QPushButton:hover {{ border-color: {t['accent']}; }}"
-        f"QToolButton {{ background: {t['btn']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 20px; color: {t['text']}; font-size: 13px; font-weight: 600; }}"
-        f"QToolButton:hover {{ border-color: {t['accent']}; }}"
+        f"QPushButton {{ background: transparent; border: none;"
+        f" padding: 4px 6px; color: {t['text']}; font-size: 11px; }}"
+        f"QPushButton:hover {{ color: {t['accent']}; }}"
+        f"QPushButton:disabled {{ color: {t['muted']}; }}"
+        f"QToolButton {{ background: transparent; border: none;"
+        f" color: {t['text']}; font-size: 13px; font-weight: 600; }}"
+        f"QToolButton:hover {{ color: {t['accent']}; }}"
         f"QCheckBox {{ color: {t['text']}; background: transparent; spacing: 8px; }}"
-        f"QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px;"
-        f" border: 1px solid {t['btn_border']}; background: {t['pane']}; }}"
-        f"QCheckBox::indicator:checked {{ background: {t['accent']}; }}"
-        f"QSpinBox {{ background: {t['pane']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 8px; padding: 4px; color: {t['text']}; }}"
-        f"QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}"
+        f"QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 8px;"
+        f" border: 2px solid {t['muted']}; background: transparent; }}"
+        f"QCheckBox::indicator:checked {{ border-color: {t['accent']};"
+        f" background: {t['accent']}; }}"
+        f"QSpinBox {{ background: transparent; border: none;"
+        f" padding: 2px; color: {t['text']}; }}"
+        f"QSpinBox::up-button, QSpinBox::down-button {{ border: none;"
+        f" background: transparent; width: 14px; }}"
+        f"QScrollBar:vertical {{ background: transparent; width: 6px; margin: 2px; }}"
         f"QScrollBar::handle:vertical {{ background: {t['btn_border']};"
         f" border-radius: 3px; min-height: 24px; }}"
         f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
         f"QScrollArea {{ background: transparent; border: none; }}"
-        f"QLineEdit {{ background: {t['pane']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 8px; padding: 6px; color: {t['text']}; }}"
-        f"QComboBox {{ background: {t['btn']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 6px; padding: 4px; color: {t['text']}; }}"
+        f"QLineEdit {{ background: transparent; border: none;"
+        f" border-bottom: 1px solid {t['btn_border']};"
+        f" padding: 4px 2px; color: {t['text']}; }}"
+        f"QLineEdit:focus {{ border-bottom: 1px solid {t['accent']}; }}"
+        f"QComboBox {{ background: transparent; border: none;"
+        f" padding: 4px 2px; color: {t['text']}; }}"
+        f"QComboBox::drop-down {{ border: none; width: 18px; }}"
         f"QComboBox QAbstractItemView {{ background: {t['pane']}; color: {t['text']};"
-        f" selection-background-color: {t['tab_sel']}; }}"
-        f"QListWidget {{ background: {t['pane']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 8px; color: {t['text']}; }}"
-        f"QTextEdit {{ background: {t['pane']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 8px; color: {t['text']}; }}"
-        f"QProgressBar {{ background: {t['pane']}; border: 1px solid {t['btn_border']};"
-        f" border-radius: 6px; color: {t['text']}; text-align: center; }}"
+        f" selection-background-color: {t['tab_sel']}; border: none; }}"
+        f"QListWidget {{ background: transparent; border: none;"
+        f" color: {t['text']}; }}"
+        f"QTextEdit {{ background: transparent; border: none;"
+        f" color: {t['text']}; }}"
+        f"QProgressBar {{ background: transparent; border: none;"
+        f" color: {t['text']}; text-align: left; max-height: 10px; }}"
         f"QProgressBar::chunk {{ background: {t['accent']}; border-radius: 4px; }}"
         f"QRadioButton {{ color: {t['text']}; background: transparent; }}"
-        f"QCalendarWidget QWidget {{ background: {t['pane']}; color: {t['text']}; }}"
+        f"QCalendarWidget QWidget {{ background: transparent; color: {t['text']};"
+        f" selection-background-color: {t['accent']}; }}"
+        f"QCalendarWidget QAbstractItemView:enabled {{ background: transparent;"
+        f" color: {t['text']}; selection-background-color: {t['accent']};"
+        f" selection-color: {t['text']}; outline: none; }}"
     )
     # clock + bot-tab labels (inherit tabs sheet, but pin subtext tones)
     try:

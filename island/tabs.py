@@ -5,10 +5,11 @@ from datetime import datetime, timezone
 
 import psutil
 from PySide6.QtCore import Qt, QTimer, QDate
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGridLayout,
-    QCalendarWidget, QListWidget, QLineEdit, QTextEdit, QProgressBar,
-    QComboBox,
+    QCalendarWidget, QListWidget, QListWidgetItem, QLineEdit, QTextEdit,
+    QProgressBar, QComboBox, QMenu, QInputDialog,
 )
 
 from . import config as cfgmod
@@ -17,7 +18,37 @@ from . import sensors as sensorsmod
 from . import themes as themesmod
 
 
-class BotTab(QWidget):
+class _TimedTab(QWidget):
+    """A tab whose polling timer runs only while it is actually visible.
+
+    `SystemNotesTab` samples psutil and reads /sys/class/thermal every 1.5s
+    and `BotTab` ticks the clock every second — both started in __init__ and
+    never stopped, so they burned for the life of the process even though
+    the card is hidden most of the time. This is the class of bug commit
+    307a2c0 fixed for the control centre but not for the tabs.
+    """
+
+    def start_timer(self, ms: int) -> None:
+        self._t = QTimer(self)
+        self._t.timeout.connect(self._tick)
+        self._t.setInterval(ms)
+        self._tick()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        t = getattr(self, "_t", None)
+        if t is not None and not t.isActive():
+            t.start()
+            self._tick()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        t = getattr(self, "_t", None)
+        if t is not None:
+            t.stop()
+
+
+class BotTab(_TimedTab):
     """Time + emotion controls. Face widget lives in panel header; this tab drives it."""
 
     EMOTIONS = [
@@ -98,10 +129,7 @@ class BotTab(QWidget):
         lay.addLayout(seed_row)
         lay.addStretch(1)
 
-        self._t = QTimer(self)
-        self._t.timeout.connect(self._tick)
-        self._t.start(1000)
-        self._tick()
+        self.start_timer(1000)
 
     def _tick(self):
         now = datetime.now()
@@ -136,44 +164,126 @@ class CalendarTab(QWidget):
         lay = QVBoxLayout(self)
         self.cal = QCalendarWidget()
         self.cal.setGridVisible(True)
+        self.cal.setAccessibleName("Date picker")
         lay.addWidget(self.cal)
         self.list = QListWidget()
+        self.list.setAccessibleName("Events on the selected date")
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._menu)
         lay.addWidget(self.list, 1)
         row = QHBoxLayout()
         self.input = QLineEdit()
         self.input.setPlaceholderText("Add event for selected date… (Enter)")
+        self.input.setAccessibleName("New event")
         self.add_btn = QPushButton("Add")
+        self.add_btn.setAccessibleName("Add this event to the selected date")
+        self.del_btn = QPushButton("Remove")
+        self.del_btn.setAccessibleName("Remove the selected event")
         row.addWidget(self.input, 1)
         row.addWidget(self.add_btn)
+        row.addWidget(self.del_btn)
         lay.addLayout(row)
         self.events = cfgmod.load_events()
         self.cal.selectionChanged.connect(self.refresh)
         self.add_btn.clicked.connect(self.add_event)
+        self.del_btn.clicked.connect(self.remove_selected)
         self.input.returnPressed.connect(self.add_event)
+        # Delete on the list, Enter to edit in place. Without these an event
+        # could be created but never removed through the UI at all.
+        self.list.installEventFilter(self)
         self.refresh()
 
-    def _key(self) -> str:
-        d: QDate = self.cal.selectedDate()
-        return d.toString("dd-mm-yyyy")
+    # ------------------------------------------------------------------
+    def _date_key(self) -> str:
+        """ISO date key: sorts chronologically and is unambiguous across
+        locales, unlike the `dd-mm-yyyy` this used (whose string order is
+        not date order and reads as mm-dd to half the world)."""
+        return self.cal.selectedDate().toString("yyyy-MM-dd")
 
     def refresh(self):
         self.list.clear()
-        for e in self.events.get(self._key(), []):
+        items = self.events.get(self._date_key(), [])
+        for e in items:
             self.list.addItem(e)
+        self.del_btn.setEnabled(bool(items))
         if self.list.count() == 0:
-            self.list.addItem("(no events — type above to add)")
+            # A real item, not a placeholder masquerading as data — the old
+            # one could be read by anything walking the list.
+            item = QListWidgetItem("Nothing scheduled. Type above to add.")
+            item.setFlags(Qt.NoItemFlags)
+            item.setForeground(QBrush(QColor(120, 120, 128)))
+            self.list.addItem(item)
 
     def add_event(self):
         txt = self.input.text().strip()
         if not txt:
+            self.input.setFocus()
             return
-        self.events.setdefault(self._key(), []).append(txt)
+        self.events.setdefault(self._date_key(), []).append(txt)
         cfgmod.save_events(self.events)
         self.input.clear()
         self.refresh()
 
+    def remove_selected(self):
+        row = self.list.currentRow()
+        items = self.events.get(self._date_key(), [])
+        # -1 is the non-selectable placeholder row.
+        if row < 0 or row >= len(items):
+            return
+        items.pop(row)
+        if items:
+            self.events[self._date_key()] = items
+        else:
+            self.events.pop(self._date_key(), None)
+        cfgmod.save_events(self.events)
+        self.refresh()
 
-class SystemNotesTab(QWidget):
+    def _menu(self, pos):
+        row = self.list.rowAt(pos.y())
+        items = self.events.get(self._date_key(), [])
+        menu = QMenu(self)
+        if 0 <= row < len(items):
+            menu.addAction("Remove", lambda: self._remove_at(row))
+            menu.addAction("Remove all on this date",
+                           lambda: self._remove_at(len(items) - 1))
+        else:
+            act = menu.addAction("Nothing to remove")
+            act.setEnabled(False)
+        menu.exec(self.list.viewport().mapToGlobal(pos))
+
+    def _remove_at(self, row: int) -> None:
+        self.list.setCurrentRow(row)
+        self.remove_selected()
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.list and event.type() == event.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Delete, Qt.Key_Backspace):
+                self.remove_selected()
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self._edit_selected()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _edit_selected(self) -> None:
+        row = self.list.currentRow()
+        items = self.events.get(self._date_key(), [])
+        if row < 0 or row >= len(items):
+            return
+        text, ok = QInputDialog.getText(self, "Edit event", "Event",
+                                        QLineEdit.Normal, items[row])
+        if not ok:
+            return
+        text = text.strip()
+        if not text:
+            return
+        items[row] = text
+        cfgmod.save_events(self.events)
+        self.refresh()
+
+
+class SystemNotesTab(_TimedTab):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
@@ -201,10 +311,8 @@ class SystemNotesTab(QWidget):
         self.notes.setText(cfgmod.load_notes())
         lay.addWidget(self.notes, 1)
 
-        self._t = QTimer(self)
-        self._t.timeout.connect(self._sys_tick)
-        self._t.start(1500)
-        self._sys_tick()
+        self._tick = self._sys_tick
+        self.start_timer(1500)
 
         self._save_t = QTimer(self)
         self._save_t.setSingleShot(True)

@@ -22,46 +22,76 @@ SPOTIFY_DIR = BOT_ROOT / "spotify"
 SPOTIFY_VENV_PY = SPOTIFY_DIR / ".venv" / "bin" / "python"
 
 if str(SPOTIFY_DIR) not in sys.path:
-    sys.path.insert(0, str(SPOTIFY_DIR))
+    # Append, not insert(0): this directory holds generically-named modules
+    # (providers, lrc, timing, overlay, inverse, cli, grab) and putting it
+    # first shadows anything else in the process that happens to share a name.
+    sys.path.append(str(SPOTIFY_DIR))
+
+from .geom import COLLAPSED_ISLAND_H, COLLAPSED_ISLAND_W, ISLAND_TOP_INSET
 
 
 # ---------------- active window (X11) ----------------
+
+class _XDisplay:
+    """Context manager that always closes the X connection.
+
+    python-xlib's Display owns a socket. Opening one per lookup and never
+    closing it leaked a file descriptor every time the Reels fallback
+    synthesised a key — which is on the GUI thread.
+    """
+
+    def __init__(self):
+        self.d = None
+
+    def __enter__(self):
+        from Xlib.display import Display
+        self.d = Display()
+        return self.d
+
+    def __exit__(self, *exc):
+        if self.d is not None:
+            try:
+                self.d.close()
+            except Exception:
+                pass
+            self.d = None
+        return False
+
 
 def get_active_window() -> tuple[str, str]:
     """(wm_class, title) of the active window, or ('','') on failure."""
     try:
         from Xlib import X
-        from Xlib.display import Display
-        d = Display()
-        root = d.screen().root
-        net_active = d.intern_atom("_NET_ACTIVE_WINDOW")
-        prop = root.get_full_property(net_active, X.AnyPropertyType)
-        if not prop or not prop.value:
-            return "", ""
-        wid = int(prop.value[0])
-        if not wid:
-            return "", ""
-        w = d.create_resource_object("window", wid)
-        title = ""
-        try:
-            t = w.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
-            if t and t.value:
-                title = t.value.decode("utf-8", "replace") if isinstance(t.value, bytes) else str(t.value)
-            if not title:
-                title = w.get_wm_name() or ""
-        except Exception:
+        with _XDisplay() as d:
+            root = d.screen().root
+            net_active = d.intern_atom("_NET_ACTIVE_WINDOW")
+            prop = root.get_full_property(net_active, X.AnyPropertyType)
+            if not prop or not prop.value:
+                return "", ""
+            wid = int(prop.value[0])
+            if not wid:
+                return "", ""
+            w = d.create_resource_object("window", wid)
+            title = ""
             try:
-                title = w.get_wm_name() or ""
+                t = w.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
+                if t and t.value:
+                    title = t.value.decode("utf-8", "replace") if isinstance(t.value, bytes) else str(t.value)
+                if not title:
+                    title = w.get_wm_name() or ""
             except Exception:
-                title = ""
-        cls = ""
-        try:
-            c = w.get_wm_class()
-            if c:
-                cls = " ".join(c)
-        except Exception:
-            pass
-        return cls, title
+                try:
+                    title = w.get_wm_name() or ""
+                except Exception:
+                    title = ""
+            cls = ""
+            try:
+                c = w.get_wm_class()
+                if c:
+                    cls = " ".join(c)
+            except Exception:
+                pass
+            return cls, title
     except Exception:
         return "", ""
 
@@ -90,27 +120,31 @@ def focus_and_send_key(window_id: int, keysym: int) -> bool:
     """Focus an X11 window and synthesize one key press+release via XTest."""
     try:
         from Xlib import X
-        from Xlib.display import Display
         from Xlib.ext import xtest
-        d = Display()
-        w = d.create_resource_object("window", int(window_id))
-        try:
-            w.raise_window()
-        except Exception:
-            pass
-        try:
-            w.set_input_focus(X.RevertToParent, X.CurrentTime)
-        except Exception:
-            pass
-        d.sync()
-        keycode = d.keysym_to_keycode(keysym)
-        if not keycode:
-            return False
-        xtest.fake_input(d, X.KeyPress, keycode)
-        d.sync()
-        xtest.fake_input(d, X.KeyRelease, keycode)
-        d.sync()
-        return True
+        with _XDisplay() as d:
+            w = d.create_resource_object("window", int(window_id))
+            try:
+                w.raise_window()
+            except Exception:
+                pass
+            focused = True
+            try:
+                w.set_input_focus(X.RevertToParent, X.CurrentTime)
+            except Exception:
+                # If we could not focus the intended window the synthesized
+                # key would land wherever the user happened to be typing.
+                focused = False
+            d.sync()
+            keycode = d.keysym_to_keycode(keysym)
+            if not keycode:
+                return False
+            if not focused:
+                return False
+            xtest.fake_input(d, X.KeyPress, keycode)
+            d.sync()
+            xtest.fake_input(d, X.KeyRelease, keycode)
+            d.sync()
+            return True
     except Exception:
         return False
 
@@ -119,18 +153,19 @@ def find_window_by_class(*needles: str) -> int | None:
     """First mapped top-level window whose WM_CLASS matches. None if none."""
     try:
         from Xlib import X
-        from Xlib.display import Display
-        d = Display()
-        root = d.screen().root
-        for wid in root.get_full_property(
-                d.intern_atom("_NET_CLIENT_LIST"), X.AnyPropertyType).value or []:
-            try:
-                w = d.create_resource_object("window", int(wid))
-                c = w.get_wm_class()
-                if c and any(n in " ".join(c).lower() for n in needles):
-                    return int(wid)
-            except Exception:
-                continue
+        with _XDisplay() as d:
+            root = d.screen().root
+            listing = root.get_full_property(
+                d.intern_atom("_NET_CLIENT_LIST"), X.AnyPropertyType)
+            ids = (listing.value if listing else None) or []
+            for wid in ids:
+                try:
+                    w = d.create_resource_object("window", int(wid))
+                    c = w.get_wm_class()
+                    if c and any(n in " ".join(c).lower() for n in needles):
+                        return int(wid)
+                except Exception:
+                    continue
     except Exception:
         pass
     return None
@@ -139,42 +174,40 @@ def find_window_by_class(*needles: str) -> int | None:
 def find_instagram_window() -> int | None:
     """Window id of an Instagram surface (tab, PWA, or native app)."""
     try:
-        from Xlib import X
-        from Xlib.display import Display
-        d = Display()
-        root = d.screen().root
-        prop = root.get_full_property(d.intern_atom("_NET_CLIENT_LIST"),
-                                      X.AnyPropertyType)
-        ids = prop.value if prop else []
-        browsers = ("chrome", "chromium", "firefox", "brave", "edge",
-                    "opera", "vivaldi")
-        apps = ("crx_", "electron", "instagram")
-        fallback = None
-        for wid in ids or []:
-            try:
-                w = d.create_resource_object("window", int(wid))
+        with _XDisplay() as d:
+            root = d.screen().root
+            prop = root.get_full_property(d.intern_atom("_NET_CLIENT_LIST"),
+                                          X.AnyPropertyType)
+            ids = prop.value if prop else []
+            browsers = ("chrome", "chromium", "firefox", "brave", "edge",
+                        "opera", "vivaldi")
+            apps = ("crx_", "electron", "instagram")
+            fallback = None
+            for wid in ids or []:
                 try:
-                    c = " ".join(w.get_wm_class() or [])
+                    w = d.create_resource_object("window", int(wid))
+                    try:
+                        c = " ".join(w.get_wm_class() or [])
+                    except Exception:
+                        c = ""
+                    try:
+                        t = w.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
+                        title = (t.value.decode("utf-8", "replace")
+                                 if t and t.value else "")
+                        if not title:
+                            title = w.get_wm_name() or ""
+                    except Exception:
+                        title = ""
+                    low = (c + " " + title).lower()
+                    if "instagram" in low:
+                        return int(wid)
+                    if ("reel" in low
+                            and any(b in low for b in browsers + apps)
+                            and fallback is None):
+                        fallback = int(wid)
                 except Exception:
-                    c = ""
-                try:
-                    t = w.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
-                    title = (t.value.decode("utf-8", "replace")
-                             if t and t.value else "")
-                    if not title:
-                        title = w.get_wm_name() or ""
-                except Exception:
-                    title = ""
-                low = (c + " " + title).lower()
-                if "instagram" in low:
-                    return int(wid)
-                if ("reel" in low
-                        and any(b in low for b in browsers + apps)
-                        and fallback is None):
-                    fallback = int(wid)
-            except Exception:
-                continue
-        return fallback
+                    continue
+            return fallback
     except Exception:
         return None
 
@@ -222,6 +255,21 @@ def spotify_process_running() -> bool:
         return False
 
 
+def _is_spotify_bus(bus: str) -> bool:
+    """True for the Spotify MPRIS bus, whatever instance suffix it carries.
+
+    Spotify commonly registers as
+    ``org.mpris.MediaPlayer2.spotify.instance<N>`` (multiple instances, or the
+    D-Bus activator) rather than the bare name. An exact/endswith test missed
+    those entirely, so the app reported "no track" while music was playing.
+    """
+    name = (bus or "").strip()
+    if not name:
+        return False
+    base = name.rsplit(".", 1)[0] if name.rsplit(".", 1)[-1].startswith("instance") else name
+    return base.endswith("org.mpris.MediaPlayer2.spotify")
+
+
 def spotify_snapshot(strict_spotify: bool = True):
     """TrackSnapshot dict or None. strict: only the Spotify desktop player,
     never a browser's media session. Never raises."""
@@ -230,12 +278,16 @@ def spotify_snapshot(strict_spotify: bool = True):
         return None
     try:
         if strict_spotify:
-            for bus in p._mpris_names():
-                if bus.rstrip().endswith(".spotify") or bus == "org.mpris.MediaPlayer2.spotify":
+            names = p._mpris_names()
+            for bus in names:
+                if _is_spotify_bus(bus):
                     snap = p._snapshot_from_mpris(bus)
                     if snap:
                         return snap.to_dict()
-            return None
+            # Fall back to the generic lookup rather than reporting nothing:
+            # a Spotify build we do not recognise by name should still work.
+            snap = p.get_mpris(prefer_spotify=True)
+            return snap.to_dict() if snap else None
         snap = p.get_mpris(prefer_spotify=True)
         return snap.to_dict() if snap else None
     except Exception:
@@ -323,24 +375,23 @@ def place_overlay_default() -> tuple[int, int] | None:
             return None
         sw, sh = 1920, 1080
         try:
-            from Xlib.display import Display
-            s = Display().screen()
-            sw, sh = int(s.width_in_pixels), int(s.height_in_pixels)
+            with _XDisplay() as d:
+                s = d.screen()
+                sw, sh = int(s.width_in_pixels), int(s.height_in_pixels)
         except Exception:
             pass
         try:
-            import json as _json
-            cfg = _json.loads((Path.home() / ".config" / "bot-island"
-                               / "config.json").read_text())
+            from . import config as cfgmod
+            cfg = cfgmod.load()
             ix, iy = cfg.get("island_x"), cfg.get("island_y")
         except Exception:
             ix, iy = None, None
         if not isinstance(ix, int) or not isinstance(iy, int):
-            ix = (sw - 252) // 2
-            iy = 8
+            ix = (sw - COLLAPSED_ISLAND_W) // 2
+            iy = ISLAND_TOP_INSET
         ow, oh = 600, 140
-        x = min(max(ix + 252 // 2 - ow // 2, 0), max(sw - ow, 0))
-        y = min(iy + 42 + 12, max(sh - oh, 0))
+        x = min(max(ix + COLLAPSED_ISLAND_W // 2 - ow // 2, 0), max(sw - ow, 0))
+        y = min(iy + COLLAPSED_ISLAND_H + 12, max(sh - oh, 0))
         pos_file.parent.mkdir(parents=True, exist_ok=True)
         import json as _json2
         pos_file.write_text(_json2.dumps({"x": int(x), "y": int(y)}))

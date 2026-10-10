@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QTimer
-from PySide6.QtGui import (QColor, QPainter, QPainterPath, QPen, QLinearGradient,
-                           QBrush)
+from PySide6.QtCore import Qt, QRectF, QPoint, QPointF, Signal, QTimer
+from PySide6.QtGui import (QColor, QPainter, QPen)
 from PySide6.QtWidgets import QWidget, QSizePolicy
+
+from . import colors as colorsmod
 
 # Default palette; themes.apply_theme() overwrites these per theme.
 PALETTE = {
@@ -78,10 +79,17 @@ class VerticalSlider(Tintable, QWidget):
         self._moved = False
         self._caption = label
         self._reason = ""
+        self._grab_offset: QPoint | None = None
         # three of these share a 96px rail: 32 each, no overflow
         self.setFixedWidth(32)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setMouseTracking(True)
+        # Keyboard-operable: the control centre used to have no focus policy
+        # at all, so none of it could be reached without a mouse.
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName(label or icon_name)
+        self.setAccessibleDescription(
+            "Drag vertically, or use the arrow keys, to change this value")
         # The animation timer only runs while a value is actually moving:
         # three sliders at 25Hz each is 75 needless wakeups a second.
         self._tick = QTimer(self)
@@ -130,27 +138,66 @@ class VerticalSlider(Tintable, QWidget):
             return 0.0
         return max(0.0, min(1.0, 1.0 - (pos.y() - top) / height))
 
+    def is_dragging(self) -> bool:
+        """True while the user is actively moving this slider."""
+        return bool(self._press)
+
     def mousePressEvent(self, event):  # noqa: N802
         if event.button() == Qt.LeftButton and self._enabled_ctrl:
             self._press = True
             self._moved = False
             self.set_value(self._value_from_pos(event.position().toPoint()), emit=True)
             self.set_cursor_grab(True)
+            # Qt only delivers move/release to this widget while the pointer
+            # is inside its rect. The column is 32 logical px wide — far
+            # narrower than a finger or a mouse's own width — so without an
+            # explicit grab the drag dies the moment the pointer drifts
+            # sideways, and the user has to release and re-press.
+            self.grabMouse()
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if self._press and self._enabled_ctrl:
             self._moved = True
-            self.set_value(self._value_from_pos(event.position().toPoint()), emit=True)
+            self.set_value(self._value_from_pos(self._drag_pos(event)), emit=True)
+
+    def _drag_pos(self, event):
+        """Event position, corrected for the implicit grab offset."""
+        pos = event.position().toPoint()
+        off = getattr(self, "_grab_offset", None)
+        if off is not None:
+            pos += off
+        return pos
 
     def mouseReleaseEvent(self, event):  # noqa: N802
-        if event.button() == Qt.LeftButton and self._press:
-            self._press = False
-            self.set_cursor_grab(False)
-            self.set_value(self._value_from_pos(event.position().toPoint()), emit=True)
-            self.released.emit(self._value)
+        if self._press:
+            if event.button() == Qt.LeftButton:
+                self._press = False
+                self._grab_offset = None
+                try:
+                    self.releaseMouse()
+                except Exception:
+                    pass
+                self.set_cursor_grab(False)
+                self.set_value(self._value_from_pos(event.position().toPoint()),
+                               emit=True)
+                self.released.emit(self._value)
+            else:
+                # A non-left release (extra button, right-click mid-drag)
+                # must not leave _press latched on forever.
+                self._press = False
+                self._grab_offset = None
+                try:
+                    self.releaseMouse()
+                except Exception:
+                    pass
+                self.set_cursor_grab(False)
 
     def set_cursor_grab(self, on: bool) -> None:
-        self.setCursor(Qt.ClosedHandCursor if on else Qt.PointingHandCursor)
+        if on:
+            self.setCursor(Qt.ClosedHandCursor)
+        else:
+            self.setCursor(Qt.PointingHandCursor if self._enabled_ctrl
+                           else Qt.ArrowCursor)
 
     def leaveEvent(self, event):  # noqa: N802
         self._hover = False
@@ -159,6 +206,37 @@ class VerticalSlider(Tintable, QWidget):
     def enterEvent(self, event):  # noqa: N802
         self._hover = True
         self.update()
+
+    def enterEvent(self, event):  # noqa: N802
+        self._hover = True
+        self.update()
+
+    # -- keyboard --------------------------------------------------------
+    def keyPressEvent(self, event):  # noqa: N802
+        if not self._enabled_ctrl:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key in (Qt.Key_Up, Qt.Key_Right):
+            self._nudge(0.05)
+        elif key in (Qt.Key_Down, Qt.Key_Left):
+            self._nudge(-0.05)
+        elif key == Qt.Key_PageUp:
+            self._nudge(0.2)
+        elif key == Qt.Key_PageDown:
+            self._nudge(-0.2)
+        elif key == Qt.Key_Home:
+            self._nudge(-2.0)
+        elif key == Qt.Key_End:
+            self._nudge(2.0)
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+    def _nudge(self, delta: float) -> None:
+        self.set_value(max(0.0, min(1.0, self._value + delta)))
+        self.released.emit(self._value)
 
     # -- animation ------------------------------------------------------
     def _animate(self) -> None:
@@ -358,10 +436,20 @@ class ToggleDot(Tintable, QWidget):
         self._press = False
         self._error_until = 0.0
         self.tip = label
-        # Circle plus a caption strip underneath. Sized for the 1-inch rail.
-        self.setFixedSize(44, 56)
+        # Circle plus a caption strip underneath. Defaults match the rail's
+        # 4-column grid; center.py sizes them for its own layout.
+        self.setFixedSize(40, 52)
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName(label)
+        self.setAccessibleDescription("Toggle. Press Space or Enter.")
+        # The error ring is time-based, so it needs its own repaint: without
+        # this the red ring only cleared on the next *state* change, and a
+        # failed toggle changes no state — so it stayed up indefinitely.
+        self._flash = QTimer(self)
+        self._flash.setSingleShot(True)
+        self._flash.timeout.connect(self.update)
 
     # -- state ----------------------------------------------------------
     def set_on(self, on: bool) -> None:
@@ -391,6 +479,7 @@ class ToggleDot(Tintable, QWidget):
 
     def flash_error(self) -> None:
         self._error_until = time.monotonic() + 1.2
+        self._flash.start(1300)   # repaint once the ring has expired
         self.update()
 
     # -- interaction ----------------------------------------------------
@@ -432,7 +521,7 @@ class ToggleDot(Tintable, QWidget):
 
         error = self._error_until > time.monotonic()
         if error:
-            ring = _c("#e06c6c")
+            ring = colorsmod.ERROR
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(ring, 2.4))
             p.drawEllipse(c, r, r)
