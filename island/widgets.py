@@ -51,8 +51,17 @@ class Tintable:
         self.update()
 
 
+# Quiet-slider geometry, in logical pixels.
+SLIDER_TRACK_W = 2.0     # the visible line
+SLIDER_GRAB_W = 28.0     # invisible but easy to hit
+SLIDER_KNOB_R = 9.0      # the only bright part
+SLIDER_TRACK_ALPHA = 46  # ~18% opacity: present, not loud
+SLIDER_ICON_ALPHA = 140
+SLIDER_ICON_PX = 15
+
+
 class VerticalSlider(Tintable, QWidget):
-    """Drag-to-set vertical bar, icon at the top, value at the bottom."""
+    """Drag-to-set vertical bar: a faint line, no fill, one clear knob."""
 
     valueChanged = Signal(float)      # emitted while dragging
     released = Signal(float)          # emitted once on release
@@ -69,8 +78,8 @@ class VerticalSlider(Tintable, QWidget):
         self._moved = False
         self._caption = label
         self._reason = ""
-        self.setMinimumSize(44, 120)
-        self.setMaximumWidth(64)
+        # three of these share a 96px rail: 32 each, no overflow
+        self.setFixedWidth(32)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setMouseTracking(True)
         # The animation timer only runs while a value is actually moving:
@@ -110,15 +119,13 @@ class VerticalSlider(Tintable, QWidget):
     # -- interaction ----------------------------------------------------
     def _geometry(self):
         w, h = self.width(), self.height()
-        cap = 16 if self._caption else 10
-        top = 6
+        cap = 14 if self._caption else 8
+        top = SLIDER_ICON_PX + 6
         bot = h - cap - 6
-        bar_w = 6
-        x = (w - bar_w) // 2
-        return x, top, bar_w, max(10, bot - top)
+        return (w - SLIDER_TRACK_W) / 2.0, top, max(10.0, bot - top)
 
     def _value_from_pos(self, pos) -> float:
-        _, top, _, height = self._geometry()
+        _, top, height = self._geometry()
         if height <= 0:
             return 0.0
         return max(0.0, min(1.0, 1.0 - (pos.y() - top) / height))
@@ -170,54 +177,52 @@ class VerticalSlider(Tintable, QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         w, h = self.width(), self.height()
-        ink = _c(self._pal["ink"], 90 if self._enabled_ctrl else 45)
-        track = _c(self._pal["track"], 255 if self._enabled_ctrl else 150)
-        fillc = _c(self._pal["accent"] if self._enabled_ctrl else self._pal["off"])
+        cx, top, height = self._geometry()
 
-        x, top, bw, bh = self._geometry()
+        track_col = _c(self._pal["ink"],
+                       SLIDER_TRACK_ALPHA if self._enabled_ctrl
+                       else SLIDER_TRACK_ALPHA // 3)
 
-        # track
+        # the track: a single faint hairline, no fill anywhere
         p.setPen(Qt.NoPen)
-        p.setBrush(track)
-        p.drawRoundedRect(QRectF(x, top, bw, bh), bw / 2, bw / 2)
+        p.setBrush(track_col)
+        p.drawRoundedRect(QRectF(cx, top, SLIDER_TRACK_W, height),
+                          SLIDER_TRACK_W / 2, SLIDER_TRACK_W / 2)
 
-        # fill grows upward from the bottom
-        fh = bh * self._shown
-        if fh > 0.5:
-            grad = QLinearGradient(x, top, x, top + bh)
-            a = fillc
-            b = QColor(a)
-            b.setAlpha(max(0, a.alpha() - 60))
-            grad.setColorAt(0.0, b)
-            grad.setColorAt(1.0, a)
-            p.setBrush(QBrush(grad))
-            p.drawRoundedRect(QRectF(x, top + bh - fh, bw, fh), bw / 2, bw / 2)
-
-        # knob
-        ky = top + bh - fh
-        kr = 7
+        # hover: a barely-there halo so the grab area is discoverable
         if self._hover and self._enabled_ctrl:
-            kr = 8
-        p.setBrush(_c(self._pal.get("bg", "#101013"), 235))
-        p.setPen(QPen(fillc, 2.0))
-        p.drawEllipse(QPointF(x + bw / 2, ky), kr, kr)
+            p.setBrush(_c(self._pal["ink"], 16))
+            p.drawRoundedRect(
+                QRectF(cx - SLIDER_GRAB_W / 2, top, SLIDER_GRAB_W, height),
+                SLIDER_GRAB_W / 2, SLIDER_GRAB_W / 2)
+
+        # the knob — the only bright element
+        ky = top + height - height * self._shown
+        kr = SLIDER_KNOB_R + (1.5 if (self._hover and self._enabled_ctrl) else 0)
+        accent = _c(self._pal["accent"] if self._enabled_ctrl
+                    else self._pal["off"])
+        p.setBrush(_c(self._pal.get("bg", "#101013"), 240))
+        p.setPen(QPen(accent, 2.0))
+        p.drawEllipse(QPointF(cx + SLIDER_TRACK_W / 2, ky), kr, kr)
 
         # icon above
         from . import icons as iconsmod
-        pm = iconsmod.pixmap(self.icon_name, 17, self._pal["ink"])
+        pm = iconsmod.pixmap(self.icon_name, SLIDER_ICON_PX, self._pal["ink"])
         if pm is not None:
-            from PySide6.QtGui import QPainter as _QP
-            p.setOpacity(0.95 if self._enabled_ctrl else 0.4)
+            p.setOpacity((SLIDER_ICON_ALPHA if self._enabled_ctrl else 60) / 255.0)
             p.drawPixmap(int((w - pm.width()) / 2), 4, pm)
             p.setOpacity(1.0)
 
         # caption
         if self._caption:
-            p.setPen(ink)
+            p.setPen(_c(self._pal["ink"] if self._enabled_ctrl
+                        else self._pal["off"]))
             f = p.font()
-            f.setPointSizeF(max(6.5, 7.0))
+            f.setPointSizeF(7.0)
             p.setFont(f)
-            p.drawText(QRectF(0, h - 17, w, 14), Qt.AlignCenter, self._caption)
+            fm = p.fontMetrics()
+            p.drawText(QRectF(0, h - 15, w, 13), Qt.AlignCenter,
+                       fm.elidedText(self._caption, Qt.ElideRight, w - 2))
         p.end()
 
 
@@ -353,8 +358,8 @@ class ToggleDot(Tintable, QWidget):
         self._press = False
         self._error_until = 0.0
         self.tip = label
-        # Circle plus a caption strip underneath.
-        self.setFixedSize(58, 70)
+        # Circle plus a caption strip underneath. Sized for the 1-inch rail.
+        self.setFixedSize(44, 56)
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
 

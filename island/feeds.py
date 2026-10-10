@@ -10,6 +10,8 @@ picker, and the user can always add a raw URL instead.
 from __future__ import annotations
 
 import time
+import os
+from pathlib import Path
 from xml.etree import ElementTree
 
 from PySide6.QtCore import (QObject, QUrl, Signal, QTimer, QDateTime, Qt)
@@ -66,6 +68,7 @@ class FeedReader(QObject):
 
     feedsChanged = Signal()        # the merged list changed
     error = Signal(str)
+    imageReady = Signal(str)       # feed url whose logo finished downloading
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,7 +76,9 @@ class FeedReader(QObject):
         self._feeds: list[dict] = []      # [{"name","url"}]
         self._items: list[dict] = []      # merged, newest first
         self._cache: dict[str, tuple[float, list[dict]]] = {}
+        self._images: dict[str, str | None] = {}   # feed url -> image url
         self._inflight: set[str] = set()
+        self._img_inflight: set[str] = set()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
 
@@ -141,9 +146,10 @@ class FeedReader(QObject):
                 return
             items = parse_feed(body)
             if not items:
-                self._show_error(feed, url)
+                self._show_error(feed, url, reply.errorString())
                 return
             self._cache[url] = (time.time(), items)
+            self._note_image(feed, url, body)
         except Exception as e:
             self._show_error(feed, url, str(e))
             return
@@ -153,6 +159,61 @@ class FeedReader(QObject):
             except Exception:
                 pass
         self._rebuild()
+
+    # ------------------------------------------------------------ images
+    def image_url(self, feed_url: str) -> str | None:
+        return self._images.get(feed_url)
+
+    def image_bytes(self, feed_url: str):
+        """Cached bytes for a feed logo, or None to fall back to a monogram."""
+        u = self._images.get(feed_url)
+        if not u:
+            return None
+        return cached_image(u)
+
+    def _note_image(self, feed: dict, url: str, body: bytes) -> None:
+        img = image_url_from_feed(body)
+        self._images[url] = img
+        if not img:
+            return
+        try:
+            if image_cache_path(img).exists():
+                self.imageReady.emit(url)
+                return
+        except Exception:
+            pass
+        self._fetch_image(url, img)
+
+    def _fetch_image(self, feed_url: str, img: str) -> None:
+        if img in self._img_inflight:
+            return
+        self._img_inflight.add(img)
+        try:
+            req = QNetworkRequest(QUrl(img))
+            req.setRawHeader(b"User-Agent", APP_UA.encode())
+            req.setTransferTimeout(TIMEOUT_MS)
+            reply = self._nam.get(req)
+        except Exception:
+            self._img_inflight.discard(img)
+            return
+        reply.finished.connect(
+            lambda *_, f=feed_url, i=img, r=reply: self._image_done(f, i, r))
+
+    def _image_done(self, feed_url: str, img: str, reply) -> None:
+        self._img_inflight.discard(img)
+        try:
+            body = bytes(reply.readAll())
+            if reply.error() == QNetworkReply.NoError and body:
+                p = image_cache_path(img)
+                p.write_bytes(body)
+                self.imageReady.emit(feed_url)
+        except Exception:
+            pass
+        finally:
+            try:
+                reply.deleteLater()
+            except Exception:
+                pass
 
     def _show_error(self, feed: dict, url: str, detail: str = "") -> None:
         """Remember the failure so the list can show it quietly."""
@@ -276,6 +337,108 @@ def parse_feed(data: bytes) -> list[dict]:
 
 def _local(tag: str) -> str:
     return tag.split("}")[-1].strip("{}").lower()
+
+
+def image_url_from_feed(data: bytes) -> str | None:
+    """Best feed logo advertised in the feed's own XML.
+
+    Deliberately never contacts a third-party favicon service: that would
+    tell a third party exactly which feeds this user reads.
+
+    The scan is namespace-agnostic on purpose — `<icon>` and
+    `<itunes:image>` only exist inside a namespaced document, and matching on
+    a fixed path finds neither of them.
+    """
+    try:
+        root = ElementTree.fromstring(data)
+    except Exception:
+        return None
+
+    # 1) channel/feed level logo, in document order
+    for el in root.iter():
+        if _local(el.tag) not in ("image", "logo", "icon"):
+            continue
+        href = (el.get("href") or "").strip()
+        if href:
+            return href                       # <itunes:image href="..."/>
+        resource = (el.get("resource") or "").strip()
+        if resource:
+            return resource                   # RDF <image rdf:resource>
+        text = (el.text or "").strip()
+        if text and text.lower().startswith("http"):
+            return text                       # Atom <icon>https://…</icon>
+        for child in el.iter():
+            if _local(child.tag) == "url" and (child.text or "").strip():
+                return child.text.strip()     # <image><url>…</url></image>
+        if text:
+            return text
+
+    # 2) first item's own attached image
+    for item in root.iter():
+        if _local(item.tag) not in ("item", "entry"):
+            continue
+        for el in item.iter():
+            name = _local(el.tag)
+            if name not in ("enclosure", "content", "thumbnail", "image"):
+                continue
+            url = (el.get("url") or el.get("href") or "").strip()
+            if not url:
+                continue
+            # media:thumbnail commonly carries no type at all
+            mime = (el.get("type") or "").strip()
+            if mime and not mime.startswith("image"):
+                continue
+            if not mime and name not in ("thumbnail", "image"):
+                continue
+            return url
+    return None
+
+
+_NS_ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+_NS_MEDIA = "http://search.yahoo.com/mrss/"
+
+
+def image_cache_dir():
+    base = Path(os.environ.get(
+        "XDG_CACHE_HOME", Path.home() / ".cache")) / "bot-island" / "feedimg"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def image_cache_path(url: str):
+    """Deterministic cache path for a feed image URL."""
+    import hashlib
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20]
+    ext = ".png"
+    low = url.lower().split("?")[0]
+    for known in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"):
+        if low.endswith(known):
+            ext = known
+            break
+    return image_cache_dir() / (digest + ext)
+
+
+def cached_image(url: str | None):
+    """Bytes of a previously downloaded feed image, or None."""
+    if not url:
+        return None
+    p = image_cache_path(url)
+    try:
+        if p.exists() and p.stat().st_size > 0:
+            return p.read_bytes()
+    except Exception:
+        pass
+    return None
+
+
+def mono_colour(name: str) -> str:
+    """Stable pastel-ish accent for the monogram fallback."""
+    import hashlib
+    h = hashlib.sha1((name or "?").encode("utf-8")).digest()
+    hue = h[0] / 255.0
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.42, 0.86)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
 def ago(ts: float) -> str:

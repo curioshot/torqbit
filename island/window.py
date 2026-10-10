@@ -15,7 +15,7 @@ from . import config as cfgmod
 from . import icons as iconsmod
 from . import sensors as sensorsmod
 from . import themes as themesmod
-from .center import ControlCenter
+from .center import ControlCenter, Rail
 from .face import FaceView
 from .glass import GlassPanel
 from .service_tab import ServiceTab
@@ -189,8 +189,6 @@ class IslandWindow(QWidget):
         cv.addWidget(self.hint)
 
         self.root.addWidget(self.card)
-        # Card sits centred over the (wider) control-centre panel below it.
-        self.root.setAlignment(self.card, Qt.AlignHCenter)
 
         # Control centre — a SECOND, deliberately separate glass panel below
         # the card, split from it by CENTRE_GAP. Opened by double-click.
@@ -198,6 +196,18 @@ class IslandWindow(QWidget):
             on_config_changed=self._centre_config_changed)
         self.center.themeToggleRequested.connect(self.set_theme)
         self.center.setObjectName("center")
+
+        # Top row: the 1-inch control rail on the left, the card beside it.
+        # The rail has no panel of its own, so it sits on the wallpaper.
+        self.top_row = QHBoxLayout()
+        self.top_row.setContentsMargins(0, 0, 0, 0)
+        self.top_row.setSpacing(CENTRE_GAP)
+        self.rail = self.center.rail
+        self.rail.setVisible(False)
+        self.top_row.addWidget(self.rail)
+        self.top_row.addWidget(self.card, 1)
+        self.top_row.addStretch(1)
+        self.root.addLayout(self.top_row)
         self.root.addSpacing(CENTRE_GAP)
         self.root.addWidget(self.center)
         self.center.setVisible(False)
@@ -272,8 +282,10 @@ class IslandWindow(QWidget):
             else:
                 self.card.setFixedWidth(EXPANDED_W)
                 self.setFixedSize(COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H)
-        # The control centre only exists in card mode.
-        self.center.setVisible(bool(self.expanded and self.centre_open))
+        # The control centre only exists in card mode; so does its rail.
+        centre_on = bool(self.expanded and self.centre_open)
+        self.rail.setVisible(centre_on)
+        self.center.setVisible(centre_on)
         if not self.centre_open:
             self.center.hide()
         else:
@@ -373,6 +385,9 @@ class IslandWindow(QWidget):
             panel_h = max(CENTRE_MIN_H, avail_h - card_h - CENTRE_GAP)
         h = card_h + CENTRE_GAP + panel_h
         w = min(CENTRE_W, max(CENTRE_MIN_W, g.width() - 24))
+        # The top row also has to fit the rail beside the card.
+        need = Rail.WIDTH + CENTRE_GAP + EXPANDED_W + 24
+        w = max(w, min(need, g.width() - 16))
         if self._centre_size != (w, panel_h):
             self._centre_size = (w, panel_h)
             self.center.setFixedSize(w, panel_h)

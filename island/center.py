@@ -33,6 +33,7 @@ from . import feeds as feedsmod
 from . import icons as iconsmod
 from . import sensors as sensorsmod
 from . import sysctl
+from .feedcar import FeedCarousel
 from .glass import GlassPanel
 from .widgets import VerticalSlider, RingGauge, ToggleDot
 
@@ -54,212 +55,6 @@ DARK_THEMES = {"black", "liquid", "minimal"}
 LIGHT_THEMES = {"white"}
 
 
-class FeedListItem(QListWidgetItem):
-    def __init__(self, title, feed, ts, link, role="headline"):
-        super().__init__()
-        self._title, self._feed, self._ts = title, feed, ts
-        self._link, self.role = link, role
-        self.setToolTip(link or feed)
-        self.setData(Qt.UserRole, self)
-
-
-class FeedPanel(QWidget):
-    """Headline list with an Add button and a manual refresh."""
-
-    feedsEdited = Signal()
-
-    def __init__(self, on_config_changed=None, parent=None):
-        super().__init__(parent)
-        self._pal = {}
-        self._on_cfg = on_config_changed
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
-
-        head = QHBoxLayout()
-        icon = QLabel()
-        pm = iconsmod.pixmap("rss", 15, "#a8a49d")
-        if pm is not None:
-            icon.setPixmap(pm)
-        head.addWidget(icon)
-        title = QLabel("Feeds")
-        title.setStyleSheet("font-size: 11px; font-weight: 700;")
-        head.addWidget(title)
-        head.addStretch(1)
-        self.count = QLabel("")
-        self.count.setStyleSheet("font-size: 9px;")
-        head.addWidget(self.count)
-        self.refresh_btn = QPushButton()
-        self.refresh_btn.setFixedSize(26, 22)
-        self.refresh_btn.setToolTip("Refresh now")
-        self.refresh_btn.clicked.connect(self._refresh)
-        head.addWidget(self.refresh_btn)
-        self.add_btn = QPushButton()
-        self.add_btn.setFixedSize(26, 22)
-        self.add_btn.setToolTip("Add a feed")
-        self.add_btn.clicked.connect(self._add)
-        head.addWidget(self.add_btn)
-        lay.addLayout(head)
-
-        self.list = QListWidget()
-        self.list.setSelectionMode(QAbstractItemView.NoSelection)
-        self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.list.setMouseTracking(True)
-        self.delegate = FeedDelegate({}, self)
-        self.list.setItemDelegate(self.delegate)
-        self.list.itemActivated.connect(self._open)
-        self.list.itemClicked.connect(self._open)
-        lay.addWidget(self.list, 1)
-
-        self.reader = feedsmod.FeedReader(self)
-        self.reader.feedsChanged.connect(self._reload)
-        self.reader.error.connect(lambda _m: None)
-
-    # -- config ---------------------------------------------------------
-    def sync_config(self, cfg: dict) -> None:
-        feeds = feedsmod.normalize(cfg.get("feeds", []))
-        self.reader.set_feeds(feeds)
-
-    def apply_palette(self, pal: dict) -> None:
-        self._pal = dict(pal)
-        self.delegate.set_palette(pal)
-        self.count.setStyleSheet(
-            f"font-size: 9px; color: {pal.get('sub', '#a8a49d')};")
-        for w in self.findChildren(QLabel):
-            if w.text() == "Feeds":
-                w.setStyleSheet(
-                    f"font-size: 11px; font-weight: 700;"
-                    f" color: {pal.get('ink', '#f2efe8')};")
-        self.list.setStyleSheet(
-            f"QListWidget {{ background: {pal.get('pane', '#101013')};"
-            f" border: 1px solid {pal.get('btn_border', '#2c2c33')};"
-            f" border-radius: 8px; padding: 2px; color: {pal.get('text', '#f2efe8')}; }}"
-            f"QListWidget::item {{ padding: 5px 6px; border-radius: 5px; }}"
-            f"QListWidget::item:hover {{ background: {pal.get('btn', '#1d1d22')}; }}"
-            f"QScrollBar:vertical {{ background: transparent; width: 6px; }}"
-            f"QScrollBar::handle:vertical {{ background: {pal.get('btn_border', '#2c2c33')};"
-            f" border-radius: 3px; min-height: 20px; }}"
-            f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}")
-
-    # -- actions --------------------------------------------------------
-    def start(self) -> None:
-        self.reader.start()
-        self.reader.refresh()
-
-    def stop(self) -> None:
-        self.reader.stop()
-
-    def _refresh(self) -> None:
-        self.reader._cache.clear()
-        self.reader.refresh()
-
-    def _add(self) -> None:
-        current = self.reader.feeds()
-        dlg = FeedPickerDialog(current, self._pal, self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        chosen = dlg.result_feeds()
-        if not chosen:
-            return
-        cfg = cfgmod.load()
-        cfg["centre"]["feeds"] = chosen
-        cfgmod.save(cfg)
-        self.reader.set_feeds(chosen)
-        self._reload()
-        self.feedsEdited.emit()
-
-    def _open(self, item) -> None:
-        link = getattr(item, "_link", "")
-        if link:
-            QDesktopServices.openUrl(QUrl(link))
-
-    # -- render ---------------------------------------------------------
-    def _reload(self) -> None:
-        self.list.clear()
-        shown = 0
-        for it in self.reader.items():
-            if it.get("error"):
-                self.list.addItem(FeedListItem(
-                    it["title"], it["feed"], 0.0, "", "error"))
-                continue
-            if it.get("pending"):
-                self.list.addItem(FeedListItem(
-                    it["title"], it["feed"], 0.0, "", "pending"))
-                continue
-            shown += 1
-            self.list.addItem(FeedListItem(
-                it["title"], it["feed"], float(it.get("ts") or 0.0),
-                it.get("link", "")))
-        self.count.setText(f"{shown} items" if shown else "")
-
-    def _refresh_buttons(self) -> None:
-        ink = self._pal.get("ink", "#f2efe8")
-        for key, name in (("add_btn", "plus"), ("refresh_btn", "refresh")):
-            btn = getattr(self, key)
-            icon = iconsmod.icon(name, 14, ink)
-            if not icon.isNull():
-                btn.setIcon(icon)
-
-    def paint_subtitle(self) -> None:
-        """Second line per row (feed name + age) via a custom item delegate."""
-        self.list.setItemDelegate(FeedDelegate(self._pal))
-
-
-class FeedDelegate(QStyledItemDelegate):
-    """Two-line rows: headline, then "feed · age" in muted text.
-
-    QListWidget cannot do a second line, and a QWidget per row is far too
-    heavy for a list that repaints on a timer.
-    """
-
-    def __init__(self, pal: dict, parent=None):
-        super().__init__(parent)
-        self.pal = dict(pal)
-
-    def set_palette(self, pal: dict) -> None:
-        self.pal = dict(pal)
-
-    def sizeHint(self, option, index):  # noqa: N802
-        s = super().sizeHint(option, index)
-        s.setHeight(max(34, s.height() + 12))
-        return s
-
-    def paint(self, p: QPainter, option, index) -> None:
-        item = index.data(Qt.UserRole)
-        if not isinstance(item, FeedListItem):
-            super().paint(p, option, index)
-            return
-        p.save()
-        try:
-            rect = option.rect
-            pal = self.pal
-            if option.state & QStyle.StateFlag.State_MouseOver:
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(pal.get("btn", "#1d1d22")))
-                p.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
-            p.setPen(QColor(pal.get("ink", "#f2efe8")
-                            if item.role == "headline"
-                            else pal.get("muted", "#6f6c68")))
-            f = p.font()
-            f.setPointSizeF(9.5)
-            p.setFont(f)
-            metrics = p.fontMetrics()
-            title = metrics.elidedText(item._title, Qt.ElideRight,
-                                       rect.width() - 82)
-            p.drawText(rect.adjusted(9, 3, -74, 0),
-                       Qt.AlignLeft | Qt.AlignVCenter, title)
-            age = feedsmod.ago(item._ts)
-            label = f"{item._feed} · {age}" if age else item._feed
-            f.setPointSizeF(8.0)
-            p.setFont(f)
-            p.setPen(QColor(pal.get("muted", "#6f6c68")))
-            lw = p.fontMetrics().horizontalAdvance(label)
-            p.drawText(rect.adjusted(max(10, rect.width() - lw - 10), 3, -8, 0),
-                       Qt.AlignLeft | Qt.AlignVCenter, label)
-        finally:
-            # Must restore even if painting raised: an unbalanced save() is
-            # what turns a paint error into a segfault.
-            p.restore()
 
 
 class FeedPickerDialog(QDialog):
@@ -350,9 +145,62 @@ class FeedPickerDialog(QDialog):
         return out
 
 
+class Rail(QWidget):
+    """The 1-inch column on the left of the card.
+
+    Sliders on top, toggle buttons underneath, and — deliberately — **no
+    panel of its own**, so the controls sit straight on the wallpaper rather
+    than inside a second box.
+    """
+
+    WIDTH = 96
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(self.WIDTH)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        self.s_mic = VerticalSlider("mic", "Mic")
+        self.s_out = VerticalSlider("speaker", "Output")
+        self.s_bright = VerticalSlider("sun", "Light")
+        bars = QHBoxLayout()
+        bars.setContentsMargins(0, 0, 0, 0)
+        bars.setSpacing(0)
+        for s in (self.s_mic, self.s_out, self.s_bright):
+            bars.addWidget(s)
+        lay.addLayout(bars, 1)
+
+        self.toggles: dict[str, ToggleDot] = {}
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(4)
+        # two per row: three would be 3x58 in a 96px column, one per row
+        # would make eight rows and a very long strip.
+        for i, (icon_name, label, full, cap, kind) in enumerate(TOGGLES):
+            d = ToggleDot(icon_name, label)
+            d.tip = full
+            self.toggles[kind] = d
+            grid.addWidget(d, i // 2, i % 2)
+        lay.addLayout(grid, 0)
+        self.resize(self.WIDTH, 420)
+
+    def apply_palette(self, pal: dict) -> None:
+        for w in (self.s_mic, self.s_out, self.s_bright):
+            w.apply_palette(pal)
+        for d in self.toggles.values():
+            d.apply_palette(pal)
+
+
 class ControlCenter(GlassPanel):
     """The second container — a glass shell, deliberately detached from the
-    card above it. Owns polling; idle when not visible."""
+    card above it. Owns polling; idle when not visible.
+
+    The sliders and toggle buttons live in `self.rail`, which the window
+    places beside the card rather than inside this panel.
+    """
 
     themeToggleRequested = Signal(str)
 
@@ -364,54 +212,32 @@ class ControlCenter(GlassPanel):
         self._last_action = 0.0
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(14)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(16)
 
-        # ---- left column: sliders + toggles ----
-        left = QVBoxLayout()
-        left.setSpacing(10)
-        bars = QHBoxLayout()
-        bars.setSpacing(6)
-        self.s_mic = VerticalSlider("mic", "Mic")
-        self.s_out = VerticalSlider("speaker", "Output")
-        self.s_bright = VerticalSlider("sun", "Light")
-        for s in (self.s_mic, self.s_out, self.s_bright):
-            s.setFixedHeight(108)
-            bars.addWidget(s)
-        # Each slider gets its own handler: they do different things, so a
-        # shared default would silently drive mic from all three.
-        self.s_mic.released.connect(lambda v: self._set_audio("mic", v))
-        self.s_out.released.connect(lambda v: self._set_audio("out", v))
-        self.s_bright.released.connect(
-            lambda v: self._set_brightness(v))
-        left.addLayout(bars)
+        # ---- the rail: outside this panel, beside the card ----
+        self.rail = Rail(self)
 
-        grid = QGridLayout()
-        grid.setSpacing(4)
-        self.toggles: dict[str, ToggleDot] = {}
-        # 4 columns x 2 rows: three rows would not fit the panel height and Qt
-        # would silently compress the rows until the captions overlapped.
-        for i, (icon_name, label, full, cap, kind) in enumerate(TOGGLES):
-            d = ToggleDot(icon_name, label)
-            d.tip = full
-            d.clicked.connect(lambda k=kind, t=d: self._toggle(k, t))
-            self.toggles[kind] = d
-            grid.addWidget(d, i // 4, i % 4)
-        left.addLayout(grid)
-        left.addStretch(1)
-        leftw = QWidget()
-        leftw.setLayout(left)
-        leftw.setFixedWidth(256)
-        root.addWidget(leftw)
-
-        # ---- centre: feeds ----
-        self.feeds = FeedPanel(on_config_changed, self)
+        # ---- feeds: continuous scroll, one feed at a time ----
+        self.feeds = FeedCarousel(on_config_changed, self)
         root.addWidget(self.feeds, 1)
 
         # ---- right: gauge ----
         self.gauge = RingGauge()
-        self.gauge.setFixedWidth(212)
+        self.gauge.setFixedWidth(196)
         root.addWidget(self.gauge)
+
+        # convenience aliases: the rail's controls, reachable from here
+        self.s_mic = self.rail.s_mic
+        self.s_out = self.rail.s_out
+        self.s_bright = self.rail.s_bright
+        self.toggles = self.rail.toggles
+        self.s_mic.released.connect(lambda v: self._set_audio("mic", v))
+        self.s_out.released.connect(lambda v: self._set_audio("out", v))
+        self.s_bright.released.connect(lambda v: self._set_brightness(v))
+        for _i, (_ic, _lb, _full, _cap, kind) in enumerate(TOGGLES):
+            self.toggles[kind].clicked.connect(
+                lambda k=kind, t=self.toggles[kind]: self._toggle(k, t))
 
         # ---- polling ----
         self._poll = QTimer(self)
@@ -454,12 +280,9 @@ class ControlCenter(GlassPanel):
 
     def apply_palette(self, pal: dict) -> None:
         self._pal = dict(pal)
-        for w in (self.s_mic, self.s_out, self.s_bright, self.gauge):
-            w.apply_palette(pal)
-        for d in self.toggles.values():
-            d.apply_palette(pal)
+        self.gauge.apply_palette(pal)
         self.feeds.apply_palette(pal)
-        self.feeds._refresh_buttons()
+        self.rail.apply_palette(pal)
         # Repaint ourselves as a glass shell so the panel is visibly its own
         # container rather than floating on the wallpaper.
         from PySide6.QtGui import QColor

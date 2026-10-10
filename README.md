@@ -19,7 +19,7 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
 
 - **Click** island/quarter: expand / collapse
 - **Double-click**: open the **control centre** — a second panel below the
-  card, separated by an 8px gap
+  card, separated by an 8px gap, with a 96px control rail to the card's left
 - **Drag** island: move (saved to `~/.config/bot-island/config.json`)
 - **Esc** / the `–` button: step back one level (centre → card → island)
 - **Right-click**: Design (island ⇄ corner), Corner, Face, Bot shape,
@@ -33,9 +33,23 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
 
 ## Control centre (double-click)
 
-A second glass panel under the card: mic / output / brightness sliders and a
-grid of toggles on the left, a live RSS list in the middle, and a ring gauge
-(temp, RAM, load, network throughput) on the right.
+A second glass panel under the card holding the news carousel and a ring gauge
+(temp, RAM, load, network throughput). The mic / output / brightness sliders
+and the toggle buttons live in a **96px rail immediately left of the card** —
+and that rail has no panel of its own, so the controls sit straight on the
+wallpaper rather than inside a third box. The rail appears and disappears with
+the centre.
+
+Sliders are deliberately quiet: a 2px hairline track at ~18% opacity with no
+fill, so the accent-coloured knob is the only bright thing. The knob is ~9px
+across inside a 28px invisible grab area. The eight toggles are a 2x4 grid of
+44x56 dots directly below them.
+
+**News is a carousel, not a list.** There is no frame, no border, no tab bar
+and no visible add/refresh button — one feed fills the strip at a time and
+scrolling flows continuously from one feed into the next. Each feed shows its
+own logo above its name, falling back to a coloured monogram, and its
+headlines beneath. Right-click anywhere in the strip to add or remove feeds.
 
 **Every control is capability-gated.** Before it does anything the bot asks
 what this machine can actually do, and a control that cannot act renders
@@ -54,7 +68,7 @@ Writes are always **read back** before being reported as done: PipeWire
 accepts `pactl set-source-volume` with exit status 0 and then ignores it on a
 suspended device, so a success code alone proves nothing.
 
-**Feeds.** `+` opens a picker with a built-in catalog grouped by category
+**Feeds.** Right-clicking the strip opens a picker with a built-in catalog grouped by category
 (News, Tech, Games, Science, Sport — every URL verified live) plus a box for
 any custom RSS/Atom URL. Everything is stored as a plain
 `[{name, url}]` list under `centre.feeds` in `config.json`, so feeds can be
@@ -128,7 +142,7 @@ through verified-good creatures.
 
 ```
 main.py  island/{window,face,tabs,config,service_tab,reels,browsers}.py
-        island/{center,widgets,sysctl,feeds}.py        ← control centre
+        island/{center,feedcar,widgets,sysctl,feeds}.py  ← control centre
 assets/{blobatar,emotion-ball,reels}/
 tools/blobatar-entry.ts   # bundle source for assets/blobatar/blobatar-face.js
 ```
@@ -141,8 +155,9 @@ extension if you ever want one back.
 
 The control centre splits cleanly by concern: `island/sysctl.py` is the
 capability-probing backend layer, `island/widgets.py` the painted widgets,
-`island/feeds.py` the RSS reader and `island/center.py` the container that
-composes them.
+`island/feeds.py` the RSS reader (including the async logo cache),
+`island/feedcar.py` the frameless carousel that renders it, and
+`island/center.py` the container that composes them.
 
 Settings live in one place — `~/.config/bot-island/config.json`. The page reads
 them when it is injected and, over CDP, writes changes from the video pill
