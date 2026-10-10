@@ -1,10 +1,21 @@
 # Bot Island — always-on-top desktop island
 
-A sleek top-screen capsule (Grok-like) that stays in front of every window.
-Click to expand: avatar + time/date/day/temp on top, menus (calendar,
-system/notes, appearance) in a glass container below. Closing flies back to
-the saved island spot. Or switch to a corner ¼-circle design. Drag to move;
-position persists.
+A frameless overlay that lives in front of every window. Three states, one
+row, no boxes: the containers, buttons and controls sit directly on the
+screen with **no background and no border** — only the components themselves
+draw anything.
+
+    collapsed pill        expanded card              full island
+    ┌──────────┐         ┌──────────┐               ┌────┬────────┬──────┬──────────┐
+    │ ◍ 12:00 ●│  ─1─▶   │ ◍ 12:00 ●│  ─2─▶        │ ▓▓ │  RSS   │ ring │ Calendar │
+    └──────────┘         ├──────────┤               │ ▓▓ │  feed  │ gauge│  to-dos  │
+                         │ tabs…    │               └────┴────────┴──────┴──────────┘
+                         │ content  │
+                         └──────────┘
+
+Everything in the sketch's first two states is one pill; the full island is
+a single row: the control rail, the news feed, the ring gauge and the
+calendar, side by side.
 
 ## Run
 
@@ -17,39 +28,60 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
 
 ## Interact
 
-- **Click** island/quarter: expand / collapse
-- **Double-click**: open the **control centre** — a second panel below the
-  card, separated by an 8px gap, with a 96px control rail to the card's left
-- **Drag** island: move (saved to `~/.config/bot-island/config.json`)
-- **Esc** / the `–` button: step back one level (centre → card → island)
+- **1 click** the pill: expand to the card
+- **Double-click** the pill *or* the card: open the **full island** directly —
+  the in-flight expand flight is cancelled, so the card never flashes past
+- **Esc** / the `–` button: step back one level (full → card → pill)
+- **⤢** button: open the full island from the card
+- **Drag** the pill: move (saved to `~/.config/bot-island/config.json`)
 - **Right-click**: Design (island ⇄ corner), Corner, Face, Bot shape,
   Emotion, Control centre (`Ctrl+Space`), Snap to top-center, Quit
-- Expanded panel tabs: **Bot/Time** (emotions, face picker, creature name,
-  shuffle), **Calendar** (add events), **System/Notes** (CPU/RAM/temp,
-  autosaved notes), **Appearance** (5 themes + creature backdrop),
-  **Service** (Instagram + Spotify)
-- Live **CPU temperature** next to the clock (capsule, header, System tab)
+- Card tabs: **Bot/Time** (clock, full-size face, emotions, shape, face
+  picker, creature name, shuffle), **Calendar** (add/edit/delete events),
+  **System/Notes** (CPU/RAM/temp, autosaved notes), **Appearance** (5 themes
+  + creature backdrop), **Service** (Instagram + Spotify)
+- Live **CPU temperature** next to the clock (pill, header, System tab)
 - Emoji-free UI: every icon is inline SVG and tints with the active theme
+- Keyboard: sliders take arrows/Home/End/PageUp/Down, `Esc` backs out of a
+  service page, everything carries an accessible name
 
-## Control centre (double-click)
+## The full island (double-click)
 
-A second glass panel under the card holding the news carousel and a ring gauge
-(temp, RAM, load, network throughput). The mic / output / brightness sliders
-and the toggle buttons live in a **96px rail immediately left of the card** —
-and that rail has no panel of its own, so the controls sit straight on the
-wallpaper rather than inside a third box. The rail appears and disappears with
-the centre.
+One row, four columns. Nothing here is a box.
+
+**The rail** — three sliders (mic, output, brightness) over a **4×4 grid of
+13 toggles**, 172px wide. It has no panel and never did: the controls sit
+straight on the wallpaper.
+
+| Toggle | Driven by | On this machine |
+|---|---|---|
+| Airplane | NetworkManager (`nmcli radio`) | working |
+| Net | `nmcli device` link state | working |
+| Wi-Fi | NM radio + adapter presence | no adapter, so disabled |
+| Bluetooth | `bluetoothctl` | no adapter, so disabled |
+| DND | Plasma 6 desktop-appletsrc | working |
+| Mic mute | `pactl` | working |
+| Speaker mute | `pactl` sink | working |
+| Theme | in-process, no backend | always |
+| Lock | `loginctl lock-session` | working |
+| Blank | `systemctl suspend`, else `xset dpms` | working |
+| Night light | Plasma D-Bus, else `gammastep` | gamma ramp only |
+| Play / pause | `playerctl` | no player, so disabled |
+| Screenshot | `spectacle` → `grim` → `gnome-screenshot` → `scrot` | spectacle |
+
+**The feed** is a carousel, not a list — no frame, no border, no tab bar, one
+feed at a time, scrolling continuously into the next. **The gauge** shows
+temp / RAM / load. **The calendar** is a compact month grid plus the selected
+day's items.
 
 Sliders are deliberately quiet: a 2px hairline track at ~18% opacity with no
 fill, so the accent-coloured knob is the only bright thing. The knob is ~9px
-across inside a 28px invisible grab area. The eight toggles are a 2x4 grid of
-44x56 dots directly below them.
+across, and the widget grabs the mouse on press so a drag that drifts off the
+48px column keeps tracking instead of dropping.
 
-**News is a carousel, not a list.** There is no frame, no border, no tab bar
-and no visible add/refresh button — one feed fills the strip at a time and
-scrolling flows continuously from one feed into the next. Each feed shows its
-own logo above its name, falling back to a coloured monogram, and its
-headlines beneath. Right-click anywhere in the strip to add or remove feeds.
+Each feed shows its own logo above its name, falling back to a coloured
+monogram, with its headlines beneath. Right-click anywhere in the strip to
+add or remove feeds.
 
 **Every control is capability-gated.** Before it does anything the bot asks
 what this machine can actually do, and a control that cannot act renders
@@ -84,9 +116,12 @@ nothing.
 
 ## Themes (Appearance tab)
 
-Liquid Glass (frosted translucency) · White · Black · System default
-(follows your KDE palette) · Minimal (flat monochrome). Right-click → Theme
-switches too; the choice persists.
+White · Black · System default (follows your KDE palette) · Minimal ·
+Liquid Glass. Right-click → Theme switches too; the choice persists.
+
+Since the containers no longer paint, a theme now only sets **ink**: text,
+subtext, muted and accent. The five remain genuinely different, but they
+change colour rather than surface — there are no surfaces left to change.
 
 ## Service tab (Instagram + Spotify)
 
@@ -141,10 +176,18 @@ through verified-good creatures.
 ## Files
 
 ```
-main.py  island/{window,face,tabs,config,service_tab,reels,browsers}.py
-        island/{center,feedcar,widgets,sysctl,feeds}.py  ← control centre
+main.py
+island/window.py      the three states, transitions, geometry
+island/geom.py        shared geometry constants (island + overlay both use these)
+island/probe.py       the off-thread worker every system probe runs on
+island/sysctl.py      capability probes; every one is gated with a reason
+island/center.py      the full island: rail, feed, gauge, calendar
+island/todo.py        the calendar column
+island/{tabs,service_tab,face,reels,browsers,services}.py
+island/{config,colors,themes,icons,glass,widgets,feedcar,feeds,sensors}.py
 assets/{blobatar,emotion-ball,reels}/
 tools/blobatar-entry.ts   # bundle source for assets/blobatar/blobatar-face.js
+tests/                184 tests: unit + an offscreen smoke run
 ```
 
 `island/reels.py` holds the browser bridge (CDP + BiDi, over `QWebSocket`, so
@@ -153,15 +196,22 @@ and the optional PATH wrapper. `assets/reels/` is the page-side engine,
 injected at runtime; it is storage-agnostic and can also be loaded by an
 extension if you ever want one back.
 
-The control centre splits cleanly by concern: `island/sysctl.py` is the
-capability-probing backend layer, `island/widgets.py` the painted widgets,
-`island/feeds.py` the RSS reader (including the async logo cache),
-`island/feedcar.py` the frameless carousel that renders it, and
-`island/center.py` the container that composes them.
+Nothing in the UI layer touches a subprocess directly. `island/sysctl.py`
+knows how to ask; `island/probe.py` knows it must not be asked on the GUI
+thread; the widgets only ever see plain numbers.
 
-Settings live in one place — `~/.config/bot-island/config.json`. The page reads
-them when it is injected and, over CDP, writes changes from the video pill
-straight back through the bot.
+## Tests
 
-Rebuild the blobatar bundle: `npx esbuild tools/blobatar-entry.ts --bundle
---format=iife --minify --outfile=assets/blobatar/blobatar-face.js`
+```bash
+.venv/bin/python -m pytest tests/ -q
+```
+
+Runs headless (`QT_QPA_PLATFORM=offscreen`) and includes a smoke test that
+constructs every screen and drives every state transition.
+
+## Rebuild the blobatar bundle
+
+```
+npx esbuild tools/blobatar-entry.ts --bundle --format=iife --minify \
+  --outfile=assets/blobatar/blobatar-face.js
+```

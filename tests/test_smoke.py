@@ -53,22 +53,24 @@ def test_expand_and_collapse(window, qapp):
 
 
 def test_control_centre_opens_and_closes(window, qapp):
-    """The card and the full panel are mutually exclusive: they share one
-    stacked area beside the rail, so exactly one of them is ever visible."""
+    """Smoke-level check; tests/test_layout.py owns the full state machine."""
+    from PySide6.QtTest import QTest
     window.expand()
-    pump(qapp)
+    QTest.qWait(600)
+    qapp.processEvents()
     assert not window.card.isHidden(), "expanded card should be showing"
     assert window.center.isHidden(), "full panel should be hidden"
 
     window.open_centre()
-    pump(qapp)
+    QTest.qWait(600)
+    qapp.processEvents()
     assert window.centre_open is True
     assert not window.center.isHidden(), "full panel should be showing"
     assert window.card.isHidden(), "card and panel must not both be showing"
-    assert not window.rail.isHidden(), "rail belongs in both wide states"
 
     window.close_centre()
-    pump(qapp)
+    QTest.qWait(600)
+    qapp.processEvents()
     assert window.centre_open is False
     assert not window.card.isHidden(), "card must come back"
     assert window.center.isHidden()

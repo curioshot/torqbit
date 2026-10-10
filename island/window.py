@@ -4,7 +4,8 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QRect, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import (Qt, QTimer, QPoint, QRect, QPropertyAnimation,
+                            QEasingCurve, QEvent)
 from PySide6.QtGui import QPainter, QColor, QPen, QRegion, QAction, QCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -35,6 +36,8 @@ ANIM_MS = 200
 ANIM_SETTLE_MS = ANIM_MS * 2
 # Waking -> idle mood change after the expand flight.
 WAKE_SETTLE_MS = 900
+# The face inside a pill, in both the collapsed capsule and the card header.
+PILL_FACE = 40
 
 
 class IslandWindow(QWidget):
@@ -84,7 +87,10 @@ class IslandWindow(QWidget):
         ch = QHBoxLayout(self.collapsed)
         ch.setContentsMargins(6, 3, 12, 3)
         ch.setSpacing(8)
-        self.mini_face = FaceView(
+        # One face widget, re-parented between the collapsed pill and the
+        # expanded card's header. They are never on screen at the same
+        # time, and a second QWebEngineView costs a browser process.
+        self.pill_face = FaceView(
             engine=self.cfg.get("face", "blobatar"),
             seed=self.cfg.get("face_name", "island-bot"),
             background=self.cfg.get("face_bg", "none"),
@@ -93,8 +99,8 @@ class IslandWindow(QWidget):
             shape=self.cfg.get("shape", "blob"),
             parent=self.collapsed,
         )
-        self.mini_face.setFixedSize(34, 34)
-        ch.addWidget(self.mini_face)
+        self.pill_face.setFixedSize(PILL_FACE, PILL_FACE)
+        ch.addWidget(self.pill_face)
         self.mini_time = QLabel("--:--")
         ch.addWidget(self.mini_time)
         self.mini_dot = QLabel()
@@ -106,46 +112,64 @@ class IslandWindow(QWidget):
         ch.addStretch(1)
         self.root.addWidget(self.collapsed)
 
-        # expanded card (glass shell, painted by GlassPanel).
-        # Top: avatar + time/date/day/temp. Bottom: tab container panel.
+        # expanded card (frameless shell). Top: a pill row of face, time and
+        # status dot. Then the tab strip. Then the tab content.
         self.card = GlassPanel(self)
         self.card.setObjectName("card")
         cv = QVBoxLayout(self.card)
-        cv.setContentsMargins(14, 12, 14, 12)
-        cv.setSpacing(8)
+        cv.setContentsMargins(4, 4, 4, 4)
+        cv.setSpacing(2)
 
+        # The pill: same three elements as the collapsed capsule, at the
+        # card's scale. It used to be a 132px avatar beside a stack of
+        # time/date/temperature, which is not what the pill reads as.
         head = QHBoxLayout()
-        self.big_face = FaceView(
+        head.setContentsMargins(8, 6, 8, 6)
+        head.setSpacing(10)
+        self._pill_slot = QVBoxLayout()
+        self._pill_slot.setContentsMargins(0, 0, 0, 0)
+        head.addLayout(self._pill_slot)
+        self.big_time = QLabel("--:--")
+        self.big_time.setAccessibleName("Time")
+        head.addWidget(self.big_time)
+        self.big_dot = QLabel()
+        self.big_dot.setFixedSize(10, 10)
+        self.big_dot.setToolTip("Status")
+        head.addWidget(self.big_dot)
+        self.big_temp = QLabel("—")
+        self.big_temp.setToolTip("CPU temperature")
+        head.addWidget(self.big_temp)
+        head.addStretch(1)
+        self.collapse_btn = QPushButton("–")
+        self.collapse_btn.setFixedSize(28, 28)
+        self.collapse_btn.setToolTip("Collapse (click the island to expand)")
+        self.collapse_btn.setAccessibleName("Collapse back to the island")
+        self.collapse_btn.clicked.connect(self.collapse)
+        head.addWidget(self.collapse_btn, 0, Qt.AlignVCenter)
+        cv.addLayout(head)
+
+        self.full_btn = QPushButton("⤢")
+        self.full_btn.setFixedSize(28, 28)
+        self.full_btn.setToolTip("Open the full island (double-click anywhere)")
+        self.full_btn.setAccessibleName("Open the full island")
+        self.full_btn.clicked.connect(self.open_centre)
+        head.addWidget(self.full_btn, 0, Qt.AlignVCenter)
+
+        self.tabs = QTabWidget()
+        # A second, larger face for the Bot tab. The card header and the
+        # collapsed pill share one (see _move_pill_face); this one is always
+        # parented to the Bot tab.
+        self.tab_face = FaceView(
             engine=self.cfg.get("face", "blobatar"),
             seed=self.cfg.get("face_name", "island-bot"),
             background=self.cfg.get("face_bg", "none"),
             eye_scale=1.15, lite=False,
             emotion=self.cfg.get("emotion", "02"),
             shape=self.cfg.get("shape", "blob"),
-            parent=self.card,
         )
-        self.big_face.setFixedSize(132, 132)
-        head.addWidget(self.big_face)
-        txt = QVBoxLayout()
-        self.big_time = QLabel("--:--")
-        self.big_date = QLabel("")
-        self.big_temp = QLabel("")
-        self.big_temp.setToolTip("CPU temperature")
-        txt.addWidget(self.big_time)
-        txt.addWidget(self.big_date)
-        txt.addWidget(self.big_temp)
-        txt.addStretch(1)
-        head.addLayout(txt, 1)
-        self.collapse_btn = QPushButton("–")
-        self.collapse_btn.setFixedSize(28, 28)
-        self.collapse_btn.setToolTip("Collapse (click island to expand)")
-        self.collapse_btn.clicked.connect(self.collapse)
-        head.addWidget(self.collapse_btn, 0, Qt.AlignTop)
-        cv.addLayout(head)
-
-        self.tabs = QTabWidget()
         self.bot_tab = BotTab(self.set_emotion, self.set_shape,
-                              self.set_face, self.set_seed)
+                              self.set_face, self.set_seed,
+                              face_view=self.tab_face)
         self.bot_tab.set_shape(self.cfg.get("shape", "blob"))
         self.bot_tab.set_face(self.cfg.get("face", "blobatar"))
         self.bot_tab.set_seed(self.cfg.get("face_name", "island-bot"))
@@ -160,6 +184,15 @@ class IslandWindow(QWidget):
         self.tabs.addTab(self.appear_tab, "Appearance")
         self.svc_tab = ServiceTab()
         self.tabs.addTab(self.svc_tab, "Service")
+
+        # Double-click anywhere in the card opens the full island. The tab
+        # bar and the header consume presses, so the filter has to reach
+        # them explicitly.
+        self.card.installEventFilter(self)
+        self.tabs.tabBar().installEventFilter(self)
+        self.tabs.installEventFilter(self)
+        self.collapse_btn.installEventFilter(self)
+        self.full_btn.installEventFilter(self)
         # bottom container: the menus live in their own glass panel
         self.content = GlassPanel(self.card)
         self.content.setObjectName("content")
@@ -210,6 +243,30 @@ class IslandWindow(QWidget):
         self.customContextMenuRequested.connect(self._menu)
 
     # ---------- geometry ----------
+    def _move_pill_face(self, expanded: bool) -> None:
+        """Put the shared face widget in whichever pill is currently on screen.
+
+        The collapsed pill and the expanded card's header are never visible
+        at the same time, so they share one QWebEngineView rather than
+        paying for a second browser process. Reparenting preserves the
+        loaded page, so this is not a reload.
+        """
+        if not hasattr(self, "pill_face"):
+            return
+        slot = getattr(self, "_pill_slot", None)
+        if slot is None:
+            return
+        try:
+            if expanded and slot.indexOf(self.pill_face) < 0:
+                slot.addWidget(self.pill_face)
+            elif not expanded and slot.indexOf(self.pill_face) >= 0:
+                slot.removeWidget(self.pill_face)
+                self.collapsed.layout().addWidget(self.pill_face)
+                self.collapsed.layout().setAlignment(
+                    self.pill_face, Qt.AlignLeft | Qt.AlignVCenter)
+        except Exception:
+            pass
+
     def _screen_geo(self) -> QRect:
         """The screen the island actually lives on, not always the primary.
 
@@ -420,15 +477,43 @@ class IslandWindow(QWidget):
                    Qt.AlignCenter, self.clock_text())
 
     # ---------- expand / collapse (click) ----------
-    def expand(self):
+    def expand(self, instant: bool = False):
         if self.expanded:
             return
         self.expanded = True
+        self._move_pill_face(True)
         self._update_rail()
         self.set_emotion("01")  # waking blip, engine auto-advances to idle
         QTimer.singleShot(WAKE_SETTLE_MS, lambda: self.set_emotion("10") if self.expanded else None)
         w, h = self._expanded_size()
+        if instant:
+            # Land on the target state with no flight, so a double-click
+            # never shows the card on its way to the full island.
+            self._cancel_animation()
+            self.setGeometry(self._expanded_geometry(w, h))
+            self._apply_mode_visual()
+            return
         self._animate_to(w, h, anchor_corner=(self.cfg.get("mode") == "corner"))
+
+    def _expanded_geometry(self, w: int, h: int) -> QRect:
+        g = self._screen_geo()
+        cur = self.geometry()
+        if self.cfg.get("mode") == "corner":
+            m = int(self.cfg.get("corner_margin", 0) or 0)
+            x, y = g.x() + g.width() - w - m, g.y() + m
+        else:
+            x = cur.x() + (cur.width() - w) // 2
+            y = cur.y()
+        return QRect(self._clamp(x, g.x(), w, g.width()),
+                     self._clamp(y, g.y(), h, g.height()), w, h)
+
+    def _cancel_animation(self) -> None:
+        anim = getattr(self, "_anim", None)
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:
+                pass
 
     def collapse(self):
         was_centre = self.centre_open
@@ -438,6 +523,7 @@ class IslandWindow(QWidget):
         if not self.expanded:
             return
         self.expanded = False
+        self._move_pill_face(False)
         self._update_rail()
         self.set_emotion("41")
         if self.cfg.get("mode") == "corner":
@@ -592,8 +678,8 @@ class IslandWindow(QWidget):
                     local = self.mapFromGlobal(QCursor.pos())
                     nx = (local.x() / max(self.width(), 1)) * 2 - 1
                     ny = (local.y() / max(self.height(), 1)) * 2 - 1
-                    self.mini_face.setGaze(nx, ny)
-                    self.big_face.setGaze(nx, ny)
+                    self.pill_face.setGaze(nx, ny)
+                    self.tab_face.setGaze(nx, ny)
                 except Exception:
                     pass
 
@@ -601,15 +687,16 @@ class IslandWindow(QWidget):
         was_drag = self._moved
         self._dragging = False
         if event.button() == Qt.LeftButton and not was_drag:
-            # Click -> card, and a second click inside the double-click
-            # interval escalates to the control centre. Both clicks are
-            # consumed by this branch, so there is no toggle-fighting and
-            # no artificial delay before the island opens.
+            # A single click acts immediately — no delay before the island
+            # opens, because this is a click target you hit constantly. A
+            # second click inside the double-click interval escalates to the
+            # full island, and the in-flight expand flight is cancelled so
+            # the card never flashes past on the way.
             now = time.monotonic()
             interval = QApplication.doubleClickInterval() / 1000.0
             if now - self._last_click < interval:
                 self._last_click = 0.0
-                self.open_centre()
+                self._double_click_action()
             else:
                 self._last_click = now
                 self.toggle()
@@ -617,6 +704,33 @@ class IslandWindow(QWidget):
             g = self.geometry()
             self.cfg["island_x"], self.cfg["island_y"] = g.x(), g.y()
             cfgmod.save(self.cfg)
+
+    def _double_click_action(self) -> None:
+        """Double-click always means "the full island", from either pill."""
+        if not self.cfg.get("centre", {}).get("enabled", True):
+            self.hint.setText("Control centre is switched off in config.json "
+                              "(centre.enabled)")
+            return
+        if not self.expanded:
+            # The first click already started an expand flight. Land it
+            # instantly so the card is not drawn for even one frame on its
+            # way to being replaced by the panel.
+            self.expand(instant=True)
+        self.open_centre()
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        """Catch double-clicks on the expanded card.
+
+        The card is made of ordinary widgets — QTabWidget, QLabel,
+        QPushButton — and several of them consume the press, so a
+        window-level handler alone never sees a double-click inside it.
+        """
+        if event.type() == QEvent.MouseButtonDblClick:
+            if event.button() == Qt.LeftButton and obj is not self:
+                self._last_click = 0.0
+                self._double_click_action()
+                return True
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):  # noqa: N802
         if event.key() == Qt.Key_Escape:
@@ -635,7 +749,8 @@ class IslandWindow(QWidget):
         s = now.strftime("%H:%M")
         self.mini_time.setText(s)
         self.big_time.setText(s)
-        self.big_date.setText(now.strftime("%A  %Y-%m-%d"))
+        if hasattr(self, "bot_tab") and self.bot_tab is not None:
+            self.bot_tab.date.setText(now.strftime("%A  %Y-%m-%d"))
         self._tick_count = getattr(self, "_tick_count", 0) + 1
         if self._tick_count == 1 or self._tick_count % 3 == 0:
             t = sensorsmod.get_cpu_temp()
@@ -658,16 +773,16 @@ class IslandWindow(QWidget):
         self.cfg["emotion"] = eid
         cfgmod.save(self.cfg)
         try:
-            self.mini_face.setEmotion(eid)
+            self.pill_face.setEmotion(eid)
         except Exception:
             pass
         try:
-            self.big_face.setEmotion(eid)
+            self.tab_face.setEmotion(eid)
         except Exception:
             pass
         if eid == "33":
             try:
-                self.big_face.burst(24)
+                self.tab_face.burst(24)
             except Exception:
                 pass
 
@@ -677,8 +792,8 @@ class IslandWindow(QWidget):
         self.cfg["shape"] = shape
         cfgmod.save(self.cfg)
         try:
-            self.mini_face.setShape(shape)
-            self.big_face.setShape(shape)
+            self.pill_face.setShape(shape)
+            self.tab_face.setShape(shape)
         except Exception:
             pass
         self.bot_tab.set_shape(shape)
@@ -691,16 +806,16 @@ class IslandWindow(QWidget):
         self.cfg["face"] = engine
         cfgmod.save(self.cfg)
         try:
-            self.mini_face.setEngine(engine)
-            self.big_face.setEngine(engine)
+            self.pill_face.setEngine(engine)
+            self.tab_face.setEngine(engine)
         except Exception:
             pass
         # re-assert seed/expression on the fresh engine
         try:
-            self.mini_face.setSeed(self.cfg.get("face_name", "island-bot"))
-            self.big_face.setSeed(self.cfg.get("face_name", "island-bot"))
-            self.mini_face.setEmotion(self.cfg.get("emotion", "02"))
-            self.big_face.setEmotion(self.cfg.get("emotion", "02"))
+            self.pill_face.setSeed(self.cfg.get("face_name", "island-bot"))
+            self.tab_face.setSeed(self.cfg.get("face_name", "island-bot"))
+            self.pill_face.setEmotion(self.cfg.get("emotion", "02"))
+            self.tab_face.setEmotion(self.cfg.get("emotion", "02"))
         except Exception:
             pass
         self.bot_tab.set_face(engine)
@@ -708,8 +823,8 @@ class IslandWindow(QWidget):
     def set_seed(self, seed: str):
         if seed == iconsmod.SHUFFLE_SENTINEL:
             try:
-                s1 = self.mini_face.shuffleSeed()
-                self.big_face.setSeed(s1)
+                s1 = self.pill_face.shuffleSeed()
+                self.tab_face.setSeed(s1)
                 seed = s1
             except Exception:
                 return
@@ -717,8 +832,8 @@ class IslandWindow(QWidget):
         self.cfg["face_name"] = seed
         cfgmod.save(self.cfg)
         try:
-            self.mini_face.setSeed(seed)
-            self.big_face.setSeed(seed)
+            self.pill_face.setSeed(seed)
+            self.tab_face.setSeed(seed)
         except Exception:
             pass
         self.bot_tab.set_seed(seed)
@@ -729,8 +844,8 @@ class IslandWindow(QWidget):
         self.cfg["face_bg"] = bg
         cfgmod.save(self.cfg)
         try:
-            self.mini_face.setBackground(bg)
-            self.big_face.setBackground(bg)
+            self.pill_face.setBackground(bg)
+            self.tab_face.setBackground(bg)
         except Exception:
             pass
         try:

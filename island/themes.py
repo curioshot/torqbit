@@ -221,11 +221,14 @@ def apply_theme(window, name: str) -> str:
         f" min-height: 10px; max-width: 10px; max-height: 10px;"
     )
 
+    # Pill scale: the header is a row of components, not a title block.
+    # The large clock now lives in the Bot/Time tab.
     window.big_time.setStyleSheet(
-        f"font-size: 38px; font-weight: 700; background: transparent; color: {t['text']};"
+        f"font-size: 17px; font-weight: 600; background: transparent; color: {t['text']};"
     )
-    window.big_date.setStyleSheet(
-        f"background: transparent; color: {t['subtext']}; font-size: 12px;"
+    window.big_dot.setStyleSheet(
+        f"background: {t['accent']}; border-radius: 5px; min-width: 10px;"
+        f" min-height: 10px; max-width: 10px; max-height: 10px;"
     )
     window.big_temp.setStyleSheet(
         f"background: transparent; color: {t['subtext']}; font-size: 12px;"
@@ -293,7 +296,7 @@ def apply_theme(window, name: str) -> str:
     # clock + bot-tab labels (inherit tabs sheet, but pin subtext tones)
     try:
         window.bot_tab.clock.setStyleSheet(
-            f"font-size: 40px; font-weight: 700; background: transparent; color: {t['text']};"
+            f"font-size: 34px; font-weight: 700; background: transparent; color: {t['text']};"
         )
         window.bot_tab.date.setStyleSheet(
             f"background: transparent; color: {t['subtext']}; font-size: 13px;"

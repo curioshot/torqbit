@@ -49,7 +49,13 @@ class _TimedTab(QWidget):
 
 
 class BotTab(_TimedTab):
-    """Time + emotion controls. Face widget lives in panel header; this tab drives it."""
+    """The "option" page: the clock, the face at full size, and the emotion
+    and creature controls.
+
+    The face used to live in the card header, which made the header a big
+    avatar block rather than the pill the collapsed island uses. It now
+    sits here, at full size, where it has room to breathe.
+    """
 
     EMOTIONS = [
         ("02", "Idle"), ("10", "Happy"), ("30", "Thinking"),
@@ -58,7 +64,8 @@ class BotTab(_TimedTab):
     ]
     EMOTION_ICONS = {"33": "party"}
 
-    def __init__(self, on_emotion, on_shape, on_face=None, on_seed=None, parent=None):
+    def __init__(self, on_emotion, on_shape, on_face=None, on_seed=None,
+                 face_view=None, parent=None):
         super().__init__(parent)
         self._on_emotion = on_emotion
         self._on_shape = on_shape
@@ -66,22 +73,34 @@ class BotTab(_TimedTab):
         self._on_seed = on_seed or (lambda _s: None)
         # styling is owned by island.themes (applied to the tab widget)
         lay = QVBoxLayout(self)
+        lay.setSpacing(6)
 
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        if face_view is not None:
+            face_view.setParent(self)
+            face_view.setFixedSize(96, 96)
+            top.addWidget(face_view, 0, Qt.AlignTop)
+
+        col = QVBoxLayout()
+        col.setSpacing(2)
         self.clock = QLabel("--:--")
         self.clock.setAlignment(Qt.AlignCenter)
-        self.clock.setStyleSheet("font-size: 40px; font-weight: 700;")
+        self.clock.setStyleSheet("font-size: 34px; font-weight: 700;")
+        self.clock.setAccessibleName("Time")
         self.date = QLabel("")
         self.date.setAlignment(Qt.AlignCenter)
-        self.date.setStyleSheet("color:#a9a6a0; font-size: 13px;")
-        lay.addWidget(self.clock)
-        lay.addWidget(self.date)
-
+        self.date.setStyleSheet("color:#a9a6a0; font-size: 12px;")
+        col.addWidget(self.clock)
+        col.addWidget(self.date)
         utc = QHBoxLayout()
         self.utc_lbl = QLabel("")
         self.utc_lbl.setAlignment(Qt.AlignCenter)
         self.utc_lbl.setStyleSheet("color:#7d7a75; font-size: 11px;")
         utc.addWidget(self.utc_lbl)
-        lay.addLayout(utc)
+        col.addLayout(utc)
+        top.addLayout(col, 1)
+        lay.addLayout(top)
 
         grid = QGridLayout()
         self.emo_buttons: dict[str, QPushButton] = {}

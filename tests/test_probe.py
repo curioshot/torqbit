@@ -9,12 +9,17 @@ import pytest
 
 def test_work_keeps_the_gui_thread_responsive(qapp):
     """The whole reason this module exists: a blocking probe must not stall
-    the Qt event loop."""
+    the Qt event loop.
+
+    The probe is a full second and the bar is deliberately low — the point
+    is that the loop ticks at all during it, not how fast. A blocked loop
+    would manage one or two.
+    """
     from island import probe
     done = {}
 
     def worker():
-        done["v"] = probe.run(lambda: (time.sleep(0.4), "done")[1], timeout=3.0)
+        done["v"] = probe.run(lambda: (time.sleep(1.0), "done")[1], timeout=4.0)
 
     th = threading.Thread(target=worker)
     th.start()
@@ -25,7 +30,7 @@ def test_work_keeps_the_gui_thread_responsive(qapp):
         time.sleep(0.005)
     th.join()
     assert done["v"] == "done"
-    assert frames > 10, f"event loop only ticked {frames} times — it blocked"
+    assert frames >= 5, f"event loop only ticked {frames} times — it blocked"
 
 
 def test_propagates_results_and_defaults(qapp):

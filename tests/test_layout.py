@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from PySide6.QtCore import Qt
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("BOT_ISLAND_NO_WEBENGINE", "1")
@@ -219,3 +220,138 @@ def test_todo_column_month_navigation(qapp, cfg_home, monkeypatch):
     assert after.month() == (before.month() % 12) + 1
     col._prev_month()
     assert col.cal.selectedDate().month() == before.month()
+
+
+# ------------------------------------------------------------ card header
+def test_pill_face_moves_between_the_two_pills(window, qapp):
+    """One QWebEngineView is shared by the collapsed pill and the card
+    header, because they are never on screen together."""
+    def where():
+        if window.collapsed.isAncestorOf(window.pill_face):
+            return "collapsed"
+        if window.card.isAncestorOf(window.pill_face):
+            return "header"
+        return "detached"
+
+    settle(qapp)
+    assert where() == "collapsed"
+    window.expand()
+    settle(qapp)
+    assert where() == "header"
+    window.collapse()
+    settle(qapp)
+    assert where() == "collapsed"
+
+
+def test_header_is_a_pill_row(window, qapp):
+    """face, time, dot, temp and the two buttons, all on one row."""
+    window.expand()
+    settle(qapp)
+    for name in ("pill_face", "big_time", "big_dot", "big_temp",
+                 "collapse_btn", "full_btn"):
+        assert hasattr(window, name), f"{name} missing from the header"
+    assert window.big_time.height() <= 48, "the clock should not be a block"
+    assert window.pill_face.height() <= 56
+
+
+def test_bot_tab_owns_the_large_face(window, qapp):
+    """The 132px avatar moved out of the header into the option tab."""
+    window.expand()
+    settle(qapp)
+    assert window.bot_tab.findChild(type(window.tab_face)) is window.tab_face
+    assert window.tab_face.height() >= 80
+
+
+def test_full_button_opens_the_full_island(window, qapp):
+    window.expand()
+    settle(qapp)
+    window.full_btn.click()
+    settle(qapp)
+    assert window.centre_open is True
+
+
+# --------------------------------------------------------- double-click
+def _release(window):
+    """Synthesise one left-button release with no drag."""
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QMouseEvent
+    pos = QPoint(10, 10)
+    window._moved = False
+    window._dragging = True
+    window.mouseReleaseEvent(QMouseEvent(
+        QEvent.MouseButtonRelease, pos, window.mapToGlobal(pos),
+        Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+
+
+def test_one_click_expands(window, qapp):
+    _release(window)
+    settle(qapp)
+    assert window.expanded is True
+    assert window.centre_open is False
+
+
+def test_second_click_within_the_interval_opens_the_full_island(window, qapp):
+    """The pill's double-click goes straight to the full island; it must not
+    linger on the expanded card."""
+    _release(window)
+    qapp.processEvents()
+    _release(window)
+    settle(qapp)
+    assert window.centre_open is True
+    assert window.card.isHidden(), "the card flashed on the way to the panel"
+
+
+def test_double_click_from_the_card_opens_the_full_island(window, qapp):
+    window.expand()
+    settle(qapp)
+    window._last_click = 0.0
+    window._double_click_action()
+    settle(qapp)
+    assert window.centre_open is True
+
+
+def test_double_click_respects_the_disabled_setting(window, qapp, cfg_home,
+                                                    monkeypatch):
+    """centre.enabled = false must not be overridden by a double-click."""
+    import json
+    from island import config as cfgmod
+    cfg = cfgmod.load()
+    cfg["centre"]["enabled"] = False
+    cfgmod.save(cfg)
+    window.cfg = cfgmod.load()
+    _release(window)
+    qapp.processEvents()
+    _release(window)
+    settle(qapp)
+    assert window.centre_open is False
+
+
+def test_escape_steps_back_one_level_at_a_time(window, qapp):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    window.open_centre()
+    settle(qapp)
+    assert window.centre_open is True
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    settle(qapp)
+    assert window.centre_open is False and window.expanded is True
+    window.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    settle(qapp)
+    assert window.expanded is False
+
+
+def test_double_click_filter_is_installed_on_the_card(window, qapp):
+    """A window-level handler alone never sees a double-click inside the
+    card, because QTabWidget and QPushButton consume the press."""
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QMouseEvent
+    window.expand()
+    settle(qapp)
+    tabbar = window.tabs.tabBar()
+    pos = QPoint(5, 5)
+    ev = QMouseEvent(QEvent.MouseButtonDblClick, pos, tabbar.mapToGlobal(pos),
+                     Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    handled = window.eventFilter(tabbar, ev)
+    settle(qapp)
+    assert handled is True
+    assert window.centre_open is True
