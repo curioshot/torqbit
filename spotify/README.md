@@ -1,4 +1,4 @@
-# spotify-lyrics (personal, not for publishing)
+# spotify-lyrics
 
 CLI + floating 3-line lyrics overlay. Shows **previous / current / next** lyric line,
 advancing with Spotify time. Overlay is draggable, always-on-top, transparent
@@ -8,14 +8,14 @@ advancing with Spotify time. Overlay is draggable, always-on-top, transparent
 ## Setup (once)
 
 ```bash
-cd ~Desktop/instagram/spotify
+cd spotify
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-No Spotify login needed on this machine: the desktop app is read via MPRIS
-(D-Bus, offline, instant). Login is only needed for the web player / remote
-devices.
+No Spotify login needed on a machine running the desktop app: it's read via
+MPRIS (D-Bus, offline, instant). Login is only needed for the web player /
+remote devices.
 
 Optional login (covers `open.spotify.com`, phone, speakers):
 
