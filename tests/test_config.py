@@ -193,6 +193,13 @@ def test_page_patch_must_be_a_dict(cfg_home):
     assert cfg_home.apply_page_patch(None) is None
 
 
+def test_new_themes_survive_sanitize(cfg_home):
+    """clean_white/modern_dark must persist, not reset to black on reload."""
+    for theme in ("clean_white", "modern_dark", "white"):
+        cfg_home.CONFIG_FILE.write_text(json.dumps({"theme": theme}))
+        assert cfg_home.load()["theme"] == theme
+
+
 # ------------------------------------------------------------- permissions
 def test_config_dir_is_not_world_readable(cfg_home):
     cfg_home.ensure_dir()

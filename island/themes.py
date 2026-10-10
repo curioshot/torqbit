@@ -1,15 +1,18 @@
-"""Five themes for the island: liquid glass, white, black, system, minimal.
+"""Seven themes for the island: liquid glass, clean white, white, modern dark,
+black, system, minimal.
 
 Single entry point: apply_theme(window, name). All widget styling lives here
 so the Appearance tab can switch looks live.
 """
 from __future__ import annotations
 
-THEME_ORDER = ("liquid", "white", "black", "system", "minimal")
+THEME_ORDER = ("liquid", "clean_white", "white", "modern_dark", "black", "system", "minimal")
 
 _LABELS = {
     "liquid": "Liquid Glass",
+    "clean_white": "Clean White",
     "white": "White",
+    "modern_dark": "Modern Dark",
     "black": "Black",
     "system": "System default",
     "minimal": "Minimal",
@@ -17,7 +20,9 @@ _LABELS = {
 
 _DESCS = {
     "liquid": "Frosted translucency, glow border (KWin blur does the frosting).",
+    "clean_white": "Pristine light theme with warm neutral surfaces and high contrast.",
     "white": "Bright light theme, dark text.",
+    "modern_dark": "Deep obsidian slate with electric cyan highlights and OLED contrast.",
     "black": "Near-black capsule, the classic look.",
     "system": "Follows your KDE palette automatically.",
     "minimal": "Flat monochrome, small radius, no decoration.",
@@ -46,24 +51,64 @@ _THEMES = {
                   "border": (255, 255, 255, 120), "bw": 1.5,
                   "gloss": True, "rim": True, "radius": 24},
     },
+    "clean_white": {
+        "capsule_bg": "rgba(255, 255, 255, 210)",
+        "capsule_border": "rgba(255, 255, 255, 120)",
+        "card_bg": "rgba(255, 255, 255, 220)",
+        "card_bg2": "rgba(255, 255, 255, 170)",
+        "card_border": "rgba(255, 255, 255, 100)",
+        "text": "#111118",
+        "subtext": "#52525e",
+        "muted": "#9494a0",
+        "accent": "#0066cc",
+        "pane": "rgba(255, 255, 255, 150)",
+        "btn": "rgba(255, 255, 255, 180)",
+        "btn_border": "rgba(255, 255, 255, 120)",
+        "tab": "rgba(255, 255, 255, 160)",
+        "tab_sel": "rgba(255, 255, 255, 240)",
+        "radius": 20,
+        "glass": {"top": (255, 255, 255, 210), "bottom": (255, 255, 255, 170),
+                  "border": (255, 255, 255, 140), "bw": 1.0,
+                  "gloss": False, "rim": False, "radius": 20},
+    },
     "white": {
-        "capsule_bg": "rgba(255, 255, 255, 244)",
-        "capsule_border": "#d5d5dc",
-        "card_bg": "#ffffff",
-        "card_bg2": "#f2f2f5",
-        "card_border": "#d5d5dc",
+        "capsule_bg": "rgba(255, 255, 255, 200)",
+        "capsule_border": "rgba(255, 255, 255, 110)",
+        "card_bg": "rgba(255, 255, 255, 210)",
+        "card_bg2": "rgba(255, 255, 255, 160)",
+        "card_border": "rgba(255, 255, 255, 90)",
         "text": "#191920",
         "subtext": "#5c5c66",
         "muted": "#8a8a94",
         "accent": "#0a8a4d",
-        "pane": "#f0f0f3",
-        "btn": "#ececf0",
-        "btn_border": "#d2d2d9",
-        "tab": "#e4e4e9",
-        "tab_sel": "#ffffff",
+        "pane": "rgba(255, 255, 255, 140)",
+        "btn": "rgba(255, 255, 255, 170)",
+        "btn_border": "rgba(255, 255, 255, 110)",
+        "tab": "rgba(255, 255, 255, 150)",
+        "tab_sel": "rgba(255, 255, 255, 230)",
         "radius": 20,
-        "glass": {"top": (255, 255, 255, 245), "bottom": (231, 234, 240, 245),
-                  "border": (203, 206, 214, 255), "bw": 1.0,
+        "glass": {"top": (255, 255, 255, 200), "bottom": (255, 255, 255, 160),
+                  "border": (255, 255, 255, 130), "bw": 1.0,
+                  "gloss": False, "rim": False, "radius": 20},
+    },
+    "modern_dark": {
+        "capsule_bg": "rgba(16, 18, 24, 240)",
+        "capsule_border": "rgba(255, 255, 255, 35)",
+        "card_bg": "rgba(13, 15, 20, 250)",
+        "card_bg2": "rgba(22, 25, 33, 250)",
+        "card_border": "rgba(255, 255, 255, 45)",
+        "text": "#f3f4f6",
+        "subtext": "#9ca3af",
+        "muted": "#6b7280",
+        "accent": "#38bdf8",
+        "pane": "rgba(28, 32, 42, 200)",
+        "btn": "rgba(35, 40, 52, 220)",
+        "btn_border": "rgba(255, 255, 255, 50)",
+        "tab": "rgba(20, 23, 30, 230)",
+        "tab_sel": "rgba(45, 52, 68, 250)",
+        "radius": 20,
+        "glass": {"top": (16, 18, 24, 240), "bottom": (13, 15, 20, 250),
+                  "border": (255, 255, 255, 45), "bw": 1.0,
                   "gloss": False, "rim": False, "radius": 20},
     },
     "black": {

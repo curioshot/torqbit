@@ -31,7 +31,7 @@ DEFAULTS = {
     "face": "blobatar",        # face engine: blobatar | aora | simple
     "face_name": "island-bot", # blobatar creature seed (any string)
     "face_bg": "none",         # blobatar backdrop: none | squircle | circle | square
-    "theme": "black",          # liquid | white | black | system | minimal
+    "theme": "black",          # liquid | clean_white | white | modern_dark | black | system | minimal
     "instagram": {              # native Reels control (bot-driven browser)
         "service": False,       # master service switch
         "enabled": True,
@@ -69,7 +69,7 @@ VALID_CORNER = ("top-left", "top-right", "bottom-left", "bottom-right")
 VALID_SHAPE = ("blob", "wedge", "gem")
 VALID_FACE = ("blobatar", "aora", "simple")
 VALID_FACE_BG = ("none", "squircle", "circle", "square")
-VALID_THEME = ("liquid", "white", "black", "system", "minimal")
+VALID_THEME = ("liquid", "clean_white", "white", "modern_dark", "black", "system", "minimal")
 
 
 def ensure_dir() -> None:
