@@ -1,6 +1,21 @@
 .venv/
 __pycache__/
 *.pyc
-.opencode/node_modules/
-instagram/.opencode/
+*.log
 spotify/.venv/
+instagram/.opencode/
+
+# opencode keeps its session ids, mission ledger and scratchpads here
+.opencode/
+
+# test + build noise
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+node_modules/
+
+# local secrets
+.env
+.env.*
