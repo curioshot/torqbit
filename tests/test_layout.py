@@ -1,8 +1,8 @@
 """The three-state layout: collapsed pill, expanded card, full island.
 
-The full island is one row (rail beside the panel), replacing the old two-row
-stacking where the card sat above the panel and the rail had to be
-re-parented between two layouts.
+The expanded card holds the control rail inside it (left of the tab
+content); the full island is feeds + gauge + calendar at full window
+width. No widget is ever re-parented between states.
 """
 from __future__ import annotations
 
@@ -64,7 +64,9 @@ def test_three_states_are_mutually_exclusive(window, qapp):
     assert visible() == ["collapsed"]
 
 
-def test_rail_is_present_in_both_wide_states(window, qapp):
+def test_rail_lives_in_the_card(window, qapp):
+    """The rail is part of the card: hidden with the pill, shown with the
+    card, hidden again with the full island (which is full-width)."""
     settle(qapp)
     assert window.rail.isHidden()
     window.expand()
@@ -72,7 +74,7 @@ def test_rail_is_present_in_both_wide_states(window, qapp):
     assert not window.rail.isHidden()
     window.open_centre()
     settle(qapp)
-    assert not window.rail.isHidden()
+    assert window.rail.isHidden(), "the full island has no rail column"
     # Collapse steps back one level at a time: full -> card -> pill.
     window.collapse()
     settle(qapp)
@@ -83,27 +85,26 @@ def test_rail_is_present_in_both_wide_states(window, qapp):
 
 
 def test_rail_is_hidden_in_corner_mode(window, qapp):
-    """In corner mode there is nothing beside the rail to control."""
+    """In corner mode the card goes solo; the full island is full-width."""
     window._set_mode("corner")
     settle(qapp)
     window.expand()
     settle(qapp)
     assert window.rail.isHidden()
-    # ...but the full island still needs it.
     window.open_centre()
     settle(qapp)
-    assert not window.rail.isHidden()
+    assert window.rail.isHidden()
 
 
 # -------------------------------------------------------------- geometry
-def test_expanded_window_fits_the_rail_beside_the_card(window, qapp):
-    """Sizing the window to EXPANDED_W left a 172px rail crammed into a
-    368px window."""
-    from island.geom import CENTRE_GAP, EXPANDED_W
+def test_expanded_card_holds_rail_and_tabs(window, qapp):
+    """The card is one fixed width holding rail + gap + tab column."""
+    from island.geom import CENTRE_GAP, EXPANDED_W, CARD_W, RAIL_W
+    assert CARD_W == EXPANDED_W + RAIL_W + CENTRE_GAP
     window.expand()
     settle(qapp)
-    assert window.width() == EXPANDED_W + window.rail.width() + CENTRE_GAP
-    assert window.card.width() == EXPANDED_W
+    assert window.width() == CARD_W
+    assert window.card.width() == CARD_W
 
 
 def test_collapsed_window_is_exactly_the_pill(window, qapp):

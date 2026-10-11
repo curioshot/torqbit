@@ -61,7 +61,7 @@ class FallbackFace(QWidget):
         self._t.timeout.connect(self._tick)
         self._t.start(90)
         self._phase = 0
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
 
     def _tick(self):
         self._phase += 1
@@ -109,7 +109,7 @@ class FaceView(QWidget):
         from PySide6.QtWidgets import QVBoxLayout
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
         self._build_inner(lay)
 
     # ---------- construction ----------
@@ -124,8 +124,6 @@ class FaceView(QWidget):
             self._engine_effective = self._engine
             try:
                 view = QWebEngineView(self)
-                view.setAttribute(Qt.WA_TranslucentBackground)
-                view.page().setBackgroundColor(Qt.transparent)
                 view.setContextMenuPolicy(Qt.NoContextMenu)
                 view.page().settings().setAttribute(
                     view.page().settings().WebAttribute.ShowScrollBars, False)

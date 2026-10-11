@@ -84,15 +84,15 @@ def test_rail_hidden_in_the_collapsed_state(window, qapp):
 
 
 def test_full_panel_is_one_row(window, qapp):
-    """The old layout stacked the card above the panel, which is what made
-    it two separate containers."""
+    """The full island is feeds + gauge + calendar at full window width;
+    the rail lives in the card, not beside the panel."""
     window.open_centre()
     pump(qapp)
     w, h = window._centre_geometry()
-    rail_w = window.rail.width()
     # Panel height is the window height now, not window minus card.
     assert h == pytest.approx(window.center.height(), abs=2)
-    assert w > rail_w, "the panel should sit beside the rail"
+    assert w == pytest.approx(window.center.width(), abs=2)
+    assert window.rail.isHidden()
 
 
 def test_every_tab_constructs_and_paints(window, qapp):

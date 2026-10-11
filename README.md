@@ -1,26 +1,40 @@
 # Bot Island — always-on-top desktop island
 
+> [!WARNING]
+> # 🚧 ONGOING PROJECT — NOT PERFECT, NOT READY FOR DAILY USE 🚧
+> **This project is under active development. Things break, features are
+> half-built, and you should not rely on it yet.**
+
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%2B%20X11-444)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-184%20passing-4c1)
+![Tests](https://img.shields.io/badge/tests-209%20passing-4c1)
 
-A frameless overlay that lives in front of every window. Three states, one
-row, no boxes: the containers, buttons and controls sit directly on the
-screen with **no background and no border** — only the components themselves
-draw anything.
+A frameless, always-on-top overlay that lives in front of every window.
+Three states — collapsed pill, expanded card, full island — all fully
+opaque: solid panels, solid buttons, visible borders, no translucency.
 
-    collapsed pill        expanded card              full island
-    ┌──────────┐         ┌──────────┐               ┌────┬────────┬──────┬──────────┐
-    │ ◍ 12:00 ●│  ─1─▶   │ ◍ 12:00 ●│  ─2─▶        │ ▓▓ │  RSS   │ ring │ Calendar │
-    └──────────┘         ├──────────┤               │ ▓▓ │  feed  │ gauge│  to-dos  │
-                         │ tabs…    │               └────┴────────┴──────┴──────────┘
-                         │ content  │
-                         └──────────┘
+![Expanded card, white theme](docs/screenshot-card.png)
 
-Everything in the sketch's first two states is one pill; the full island is
-a single row: the control rail, the news feed, the ring gauge and the
-calendar, side by side.
+    collapsed pill      expanded card                 full island
+    ┌──────────┐       ┌──────────────┐               ┌────────┬──────┬──────────┐
+    │ ◍ 12:00 ●│  ─1─▶ │ ▓▓ │ tabs…   │  ─2─▶        │  RSS   │ ring │ Calendar │
+    └──────────┘       │ ▓▓ │ content │               │  feed  │ gauge│  to-dos  │
+                       └──────────────┘               └────────┴──────┴──────────┘
+
+The expanded card holds the control rail inside it (sliders + toggles left
+of the tabs). The full island is feeds, gauge and calendar at full width —
+no widget is ever moved between states.
+
+| What | Where |
+|---|---|
+| Sliders + 13 toggles (mic, output, brightness, radios, …) | Card, left column |
+| Clock, face, emotions, creature picker | Card → Bot tab |
+| Calendar events | Card → Calendar tab, and full island → To-dos |
+| CPU / RAM / temp, scratch notes | Card → System tab |
+| RSS / Atom feeds | Full island |
+| 7 opaque themes | Card → Theme tab, or right-click → Theme |
+| Instagram Reels + Spotify | Card → Service tab |
 
 ## Run
 
@@ -41,10 +55,11 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
 - **Drag** the pill: move (saved to `~/.config/bot-island/config.json`)
 - **Right-click**: Design (island ⇄ corner), Corner, Face, Bot shape,
   Emotion, Control centre (`Ctrl+Space`), Snap to top-center, Quit
-- Card tabs: **Bot/Time** (clock, full-size face, emotions, shape, face
+- Card tabs: **Bot** (clock, full-size face, emotions, shape, face
   picker, creature name, shuffle), **Calendar** (add/edit/delete events),
-  **System/Notes** (CPU/RAM/temp, autosaved notes), **Appearance** (7 themes
-  + creature backdrop), **Service** (Instagram + Spotify)
+  **System** (CPU/RAM/temp, autosaved notes), **Theme** (7 themes
+  + creature backdrop), **Service** (Instagram + Spotify). The control
+  rail (sliders + toggles) sits left of the tabs, inside the card.
 - Live **CPU temperature** next to the clock (pill, header, System tab)
 - Emoji-free UI: every icon is inline SVG and tints with the active theme
 - Keyboard: sliders take arrows/Home/End/PageUp/Down, `Esc` backs out of a
@@ -52,11 +67,12 @@ Requirements: Linux + X11 (tested KDE Plasma), Python 3.10+.
 
 ## The full island (double-click)
 
-One row, four columns. Nothing here is a box.
+One row, three columns: feed, gauge, calendar. Everything is opaque —
+solid panels, solid controls, visible borders.
 
-**The rail** — three sliders (mic, output, brightness) over a **4×4 grid of
-13 toggles**, 172px wide. It has no panel and never did: the controls sit
-straight on the wallpaper.
+**The rail** lives in the expanded card now (left of the tabs): three
+sliders (mic, output, brightness) over a **4-column grid of 13 toggles**
+with room to breathe, on its own solid card.
 
 | Toggle | Driven by | On this machine |
 |---|---|---|
@@ -79,10 +95,9 @@ feed at a time, scrolling continuously into the next. **The gauge** shows
 temp / RAM / load. **The calendar** is a compact month grid plus the selected
 day's items.
 
-Sliders are deliberately quiet: a 2px hairline track at ~18% opacity with no
-fill, so the accent-coloured knob is the only bright thing. The knob is ~9px
-across, and the widget grabs the mouse on press so a drag that drifts off the
-48px column keeps tracking instead of dropping.
+Sliders are solid and easy to grab: an 8px track with an accent fill below
+a 10px white knob, and the widget grabs the mouse on press so a drag that
+drifts off the column keeps tracking instead of dropping.
 
 Each feed shows its own logo above its name, falling back to a coloured
 monogram, with its headlines beneath. Right-click anywhere in the strip to
@@ -121,14 +136,15 @@ nothing.
 
 ## Themes (Appearance tab)
 
-Liquid Glass · Clean White · White · Modern Dark · Black · System default
+Deep Slate · Clean White · White · Modern Dark · Black · System default
 (follows your KDE palette) · Minimal. Right-click → Theme switches too; the
 choice persists.
 
-Since the containers no longer paint, a theme mostly sets **ink**: text,
-subtext, muted and accent, plus whatever translucency it still needs. The
-seven are genuinely different, but they change colour and alpha rather than
-surface — there are no surfaces left to change.
+Every theme is fully opaque: solid panel fills, solid buttons and tabs
+with visible 1px borders. The seven differ in surface, ink and accent —
+**White** is pure-white surfaces with blue accents, **Clean White** its
+warm off-white sibling, plus Liquid (slate blue), Modern Dark, Black,
+System default (follows your KDE palette) and Minimal.
 
 ## Service tab (Instagram + Spotify)
 
@@ -194,7 +210,7 @@ island/{tabs,service_tab,face,reels,browsers,services}.py
 island/{config,colors,themes,icons,glass,widgets,feedcar,feeds,sensors}.py
 assets/{blobatar,emotion-ball,reels}/
 tools/blobatar-entry.ts   # bundle source for assets/blobatar/blobatar-face.js
-tests/                184 tests: unit + an offscreen smoke run
+tests/                209 tests: unit + offscreen smoke runs (card, centre, themes)
 ```
 
 `island/reels.py` holds the browser bridge (CDP + BiDi, over `QWebSocket`, so

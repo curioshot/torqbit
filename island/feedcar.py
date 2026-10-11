@@ -28,17 +28,27 @@ ITEM_GAP = 3
 
 
 class Monogram(QLabel):
-    """First letter of the feed name on a stable per-feed colour."""
+    """First letter of the feed name on a stable per-feed colour.
 
-    def __init__(self, name: str, parent=None):
+    Rendered on a solid base in the section's pane colour — fully opaque,
+    like everything else in the UI.
+    """
+
+    def __init__(self, name: str, bg: str = "#151519", parent=None):
         super().__init__(parent)
         self.setFixedSize(MONO_PX, MONO_PX)
         self._name = name or "?"
+        self._bg = bg
         self.setPixmap(self._render())
+
+    def set_background(self, bg: str) -> None:
+        if bg != self._bg:
+            self._bg = bg
+            self.setPixmap(self._render())
 
     def _render(self) -> QPixmap:
         pm = QPixmap(MONO_PX, MONO_PX)
-        pm.fill(Qt.transparent)
+        pm.fill(QColor(self._bg))
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
@@ -63,6 +73,7 @@ class FeedSection(QWidget):
         self._name = name
         self._ages: list[QLabel] = []
         self._texts: list[QLabel] = []
+        self._dots: list[QLabel] = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 0, 2, 6)
         lay.setSpacing(ITEM_GAP)
@@ -75,8 +86,12 @@ class FeedSection(QWidget):
         pm = QPixmap()
         if image_bytes:
             pm.loadFromData(image_bytes)
+        self._mono: Monogram | None = None
+        self._pic_is_mono = False
         if pm.isNull() or pm.width() <= 1:
-            self.pic.setPixmap(Monogram(name).pixmap())
+            self._mono = Monogram(name, self._pal.get("pane", "#151519"))
+            self.pic.setPixmap(self._mono.pixmap())
+            self._pic_is_mono = True
         else:
             self.pic.setPixmap(pm.scaled(
                 IMAGE_PX, IMAGE_PX, Qt.KeepAspectRatio,
@@ -97,15 +112,23 @@ class FeedSection(QWidget):
         lay.addSpacing(3)
 
         for it in items:
-            row = QHBoxLayout()
+            # A container widget per row (not a bare layout): word-wrapped
+            # labels inside bare nested layouts miscompute their height and
+            # paint on top of each other. The container gives Qt a real
+            # widget height to work with.
+            cell = QWidget()
+            row = QHBoxLayout(cell)
+            row.setContentsMargins(0, 1, 0, 1)
             row.setSpacing(6)
             dot = QLabel()
-            dot.setFixedSize(4, 4)
+            dot.setFixedSize(6, 6)
             dot.setPixmap(self._dot_pixmap(name))
-            dot.setStyleSheet("background: transparent;")
+            self._dots.append(dot)
             row.addWidget(dot, 0, Qt.AlignTop)
             txt = QLabel(it.get("title", ""))
             txt.setWordWrap(True)
+            txt.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            txt.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             txt.setToolTip(it.get("link", "") or name)
             self._texts.append(txt)
             row.addWidget(txt, 1)
@@ -114,7 +137,7 @@ class FeedSection(QWidget):
             age.setAlignment(Qt.AlignRight | Qt.AlignTop)
             self._ages.append(age)
             row.addWidget(age, 0, Qt.AlignTop)
-            lay.addLayout(row)
+            lay.addWidget(cell)
         lay.addSpacing(HEAD_GAP)
 
     def set_image(self, image_bytes) -> None:
@@ -125,34 +148,43 @@ class FeedSection(QWidget):
         pm.loadFromData(image_bytes)
         if pm.isNull() or pm.width() <= 1:
             return
+        self._pic_is_mono = False
         self.pic.setPixmap(pm.scaled(
             IMAGE_PX, IMAGE_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def _dot_pixmap(self, name: str) -> QPixmap:
-        pm = QPixmap(4, 4)
-        pm.fill(Qt.transparent)
+        pm = QPixmap(6, 6)
+        pm.fill(QColor(self._pal.get("pane", "#151519") if self._pal else "#151519"))
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(feedsmod.mono_colour(name)))
-        p.drawEllipse(0, 0, 4, 4)
+        p.drawEllipse(0, 0, 6, 6)
         p.end()
         return pm
 
     def apply_palette(self, pal: dict) -> None:
         self._pal = dict(pal)
-        ink = pal.get("ink", "#f2efe8")
+        ink = pal.get("text", pal.get("ink", "#f2efe8"))
         sub = pal.get("sub", "#a8a49d")
         muted = pal.get("muted", "#6f6c68")
+        pane = pal.get("pane", "#151519")
         self.title.setStyleSheet(
-            f"color:{ink}; font-size:11px; font-weight:700; background:transparent;")
+            f"color:{ink}; font-size:12px; font-weight:700; background:{pane};")
         self.rule.setStyleSheet(f"background:{muted}; border:none;")
         for t in self._texts:
             t.setStyleSheet(
-                f"color:{sub}; font-size:9.5px; background:transparent;")
+                f"color:{sub}; font-size:10px; background:{pane};")
         for a in self._ages:
             a.setStyleSheet(
-                f"color:{muted}; font-size:8px; background:transparent;")
+                f"color:{muted}; font-size:8px; background:{pane};")
+        # Re-render the solid icon bases in the new pane colour so no
+        # per-pixel alpha is left anywhere in the feed column.
+        for d in self._dots:
+            d.setPixmap(self._dot_pixmap(self._name))
+        if self._pic_is_mono and self._mono is not None:
+            self._mono.set_background(pane)
+            self.pic.setPixmap(self._mono.pixmap())
 
 
 class FeedCarousel(QWidget):
@@ -174,23 +206,18 @@ class FeedCarousel(QWidget):
         self.scroll.setFrameShape(QFrame.NoFrame)      # no frame, no border
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll.viewport().setAutoFillBackground(False)
-        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.scroll.viewport().setAutoFillBackground(True)
 
         self.body = QWidget()
-        # The strip has no panel of its own: without this it inherits the
-        # default opaque palette grey and paints a light slab over the glass.
-        self.body.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.body.setAutoFillBackground(False)
-        self.body.setStyleSheet("background: transparent;")
+        # Opaque strip: solid canvas so text never floats over wallpaper.
+        self.body.setAutoFillBackground(True)
         self.body_lay = QVBoxLayout(self.body)
-        self.body_lay.setContentsMargins(0, 0, 4, 0)
+        self.body_lay.setContentsMargins(8, 8, 8, 0)
         self.body_lay.setSpacing(0)
         self.body_lay.addStretch(1)
         self.scroll.setWidget(self.body)
         lay.addWidget(self.scroll, 1)
 
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
@@ -254,11 +281,30 @@ class FeedCarousel(QWidget):
 
     def apply_palette(self, pal: dict) -> None:
         self._pal = dict(pal)
+        pane = pal.get("pane", "#151519")
+        card = pal.get("bg", "#101013")
+        border = pal.get("btn_border", "#34343c")
+        # Viewports ignore stylesheets on some styles — pin the palette too
+        # so the scroll area never flashes default light-grey/white.
+        try:
+            from PySide6.QtGui import QPalette, QColor
+            vp_pal = self.scroll.viewport().palette()
+            vp_pal.setColor(QPalette.Base, QColor(pane))
+            vp_pal.setColor(QPalette.Window, QColor(pane))
+            self.scroll.viewport().setPalette(vp_pal)
+            bp = self.body.palette()
+            bp.setColor(QPalette.Base, QColor(pane))
+            bp.setColor(QPalette.Window, QColor(pane))
+            self.body.setPalette(bp)
+        except Exception:
+            pass
+        self.body.setStyleSheet(f"background: {pane};")
         self.scroll.setStyleSheet(
-            f"QScrollArea {{ border: none; background: transparent; }}"
-            f"QScrollBar:vertical {{ background: transparent; width: 6px; margin: 0; }}"
-            f"QScrollBar::handle:vertical {{ background: {pal.get('btn_border', '#2c2c33')};"
-            f" border-radius: 3px; min-height: 24px; }}"
+            f"QScrollArea {{ background: {pane}; border: 1px solid {border};"
+            f" border-radius: 8px; }}"
+            f"QScrollBar:vertical {{ background: {pane}; width: 10px; margin: 2px; }}"
+            f"QScrollBar::handle:vertical {{ background: {border};"
+            f" border-radius: 5px; min-height: 28px; }}"
             f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}")
         for sec in self._sections:
             sec.apply_palette(pal)

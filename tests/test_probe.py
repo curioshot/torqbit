@@ -149,11 +149,21 @@ def test_every_toggle_has_a_backend_capability_key():
 
 
 def test_every_toggle_kind_has_an_action():
-    """Each kind must be handled by ControlCenter._toggle, otherwise
+    """Each kind must be handled by Controls._toggle, otherwise
     clicking it flashes an error forever."""
     import inspect
-    from island.center import ControlCenter, TOGGLES
-    src = inspect.getsource(ControlCenter._toggle)
+    from island.center import Controls, TOGGLES
+    src = inspect.getsource(Controls._toggle)
     for _i, _l, _f, _c, kind in TOGGLES:
         assert f'kind == "{kind}"' in src, (
             f"toggle {kind!r} has no branch in _toggle()")
+
+
+def test_rail_captions_fit_their_dots(qapp):
+    """Labels bled into their neighbours on the old 44px dots."""
+    from island.center import DOT_W
+    assert DOT_W >= 48, f"dots are {DOT_W}px wide; captions clip"
+    from island.widgets import ToggleDot
+    import inspect
+    src = inspect.getsource(ToggleDot.__init__)
+    assert "48, 60" in src, "ToggleDot fixed size drifted from DOT_W/DOT_H"

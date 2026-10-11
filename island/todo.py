@@ -36,7 +36,7 @@ class TodoColumn(QWidget):
         self._events: dict[str, list[str]] = {}
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(6)
 
         title = QLabel("To-dos")
@@ -47,8 +47,15 @@ class TodoColumn(QWidget):
         self.cal = QCalendarWidget()
         self.cal.setGridVisible(True)
         # A full QCalendarWidget in a 260px column is unreadable; the
-        # navigation bar alone eats a third of it.
+        # navigation bar alone eats a third of it. Week numbers go too:
+        # the extra column paints with the Window palette (light) while
+        # the day cells use Base (dark) — a white stripe on a dark card.
         self.cal.setNavigationBarVisible(False)
+        try:
+            from PySide6.QtWidgets import QCalendarWidget as _QCW
+            self.cal.setVerticalHeaderFormat(_QCW.NoVerticalHeader)
+        except Exception:
+            pass
         self.cal.setFixedHeight(168)
         self.cal.setAccessibleName("Date picker")
         lay.addWidget(self.cal)
@@ -176,3 +183,32 @@ class TodoColumn(QWidget):
     # ------------------------------------------------------------------
     def apply_palette(self, pal: dict) -> None:
         self._pal = dict(pal)
+        pane = pal.get("pane", "#151519")
+        card = pal.get("bg", "#101013")
+        border = pal.get("btn_border", "#34343c")
+        text = pal.get("text", pal.get("ink", "#f2efe8"))
+        accent = pal.get("accent", "#59d98c")
+        # Viewports (list + calendar grid) ignore stylesheets on some Qt
+        # styles and fall back to the light system palette — pin them dark.
+        try:
+            from PySide6.QtGui import QPalette, QColor
+            for view in (self.list.viewport(), self.cal):
+                vp = view.palette()
+                vp.setColor(QPalette.Base, QColor(card))
+                vp.setColor(QPalette.Window, QColor(card))
+                vp.setColor(QPalette.Text, QColor(text))
+                vp.setColor(QPalette.WindowText, QColor(text))
+                view.setPalette(vp)
+        except Exception:
+            pass
+        self.month.setStyleSheet(
+            f"background: {pane}; color: {text}; font-size: 12px; font-weight: 700;")
+        self.cal.setStyleSheet(
+            f"background: {card}; color: {text}; border: 1px solid {border};"
+            f" border-radius: 8px; selection-background-color: {accent};")
+        self.list.setStyleSheet(
+            f"background: {card}; border: 1px solid {border}; border-radius: 8px;"
+            f" color: {text}; padding: 4px;")
+        self.input.setStyleSheet(
+            f"background: {card}; border: 1px solid {border}; border-radius: 6px;"
+            f" padding: 5px 7px; color: {text};")

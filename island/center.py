@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 import webbrowser
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QObject
 from PySide6.QtGui import QDesktopServices, QColor, QBrush, QPen, QPainter
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
@@ -35,6 +35,7 @@ from . import probe as probes
 from . import sensors as sensorsmod
 from . import sysctl
 from .feedcar import FeedCarousel
+from .geom import (RAIL_COLUMNS, DOT_W, DOT_H, DOT_GAP, SLIDER_W, RAIL_W)
 from .glass import GlassPanel
 from .todo import TodoColumn, CALENDAR_W
 from .widgets import VerticalSlider, RingGauge, ToggleDot
@@ -69,13 +70,10 @@ TOGGLES = [
     ("speed", "Shot", "Save a screenshot", "screenshot", "screenshot"),
 ]
 
-# The rail is a 4-column grid. Grid spacing and dot size are chosen so a
-# dot never wraps to the next row: RAIL_W must be >= 4*DOT_W + 3*DOT_GAP.
-RAIL_COLUMNS = 4
-DOT_W, DOT_H = 40, 52
-DOT_GAP = 4
-SLIDER_W = 48
-RAIL_W = max(96, RAIL_COLUMNS * DOT_W + (RAIL_COLUMNS - 1) * DOT_GAP)
+# The rail is a 4-column grid living inside the expanded card. Sizes live
+# in geom.py (re-exported here so `from island.center import DOT_W` keeps
+# working); the invariant is RAIL_W >= 4*DOT_W + 3*DOT_GAP, so a dot never
+# wraps to the next row and captions never bleed into their neighbour.
 
 
 def _rows_for(count: int, columns: int = RAIL_COLUMNS) -> int:
@@ -177,8 +175,7 @@ class FeedPickerDialog(QDialog):
 
 class Rail(QWidget):
     """The control column on the left: sliders on top, a 4-column grid of
-    toggles underneath, and — deliberately — **no panel of its own**, so the
-    controls sit straight on the wallpaper rather than inside a second box.
+    toggles underneath, on one solid opaque card.
     """
 
     WIDTH = RAIL_W
@@ -186,17 +183,17 @@ class Rail(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(RAIL_W)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(12)
 
         self.s_mic = VerticalSlider("mic", "Mic")
         self.s_out = VerticalSlider("speaker", "Output")
         self.s_bright = VerticalSlider("sun", "Light")
         bars = QHBoxLayout()
         bars.setContentsMargins(0, 0, 0, 0)
-        bars.setSpacing(8)
+        bars.setSpacing(10)
         for s in (self.s_mic, self.s_out, self.s_bright):
             s.setFixedWidth(SLIDER_W)
             bars.addWidget(s)
@@ -224,14 +221,21 @@ class Rail(QWidget):
             w.apply_palette(pal)
         for d in self.toggles.values():
             d.apply_palette(pal)
+        pane = pal.get("pane", "#151519")
+        border = pal.get("btn_border", "#34343c")
+        text = pal.get("text", pal.get("ink", "#f2efe8"))
+        self.setStyleSheet(
+            f"Rail {{ background: {pane}; border: 1px solid {border};"
+            f" border-radius: 12px; }}"
+            f"Rail QLabel {{ background: {pane}; color: {text}; border: none; }}")
 
 
-class ControlCenter(GlassPanel):
-    """The second container — a glass shell, deliberately detached from the
-    card above it. Owns polling; idle when not visible.
+class Controls(QObject):
+    """Owner of the rail: backend, capabilities, wiring and polling.
 
-    The sliders and toggle buttons live in `self.rail`, which the window
-    places beside the card rather than inside this panel.
+    The rail widget lives inside the expanded card (not beside it), so its
+    polling lifecycle is driven by the window — start() when the card
+    shows, stop() when it hides — rather than by panel show/hide events.
     """
 
     themeToggleRequested = Signal(str)
@@ -243,28 +247,7 @@ class ControlCenter(GlassPanel):
         self._pal = {}
         self._theme = "black"
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(20)
-
-        # ---- the rail: outside this panel, in the row beside it ----
-        self.rail = Rail(self)
-
-        # ---- feeds: continuous scroll, one feed at a time ----
-        self.feeds = FeedCarousel(on_config_changed, self)
-        root.addWidget(self.feeds, 1)
-
-        # ---- gauge ----
-        self.gauge = RingGauge()
-        self.gauge.setFixedWidth(GAUGE_W)
-        root.addWidget(self.gauge)
-
-        # ---- calendar / to-dos, as the last column ----
-        self.calendar = TodoColumn(on_config_changed, self)
-        self.calendar.setFixedWidth(CALENDAR_W)
-        root.addWidget(self.calendar)
-
-        # convenience aliases: the rail's controls, reachable from here
+        self.rail = Rail()
         self.s_mic = self.rail.s_mic
         self.s_out = self.rail.s_out
         self.s_bright = self.rail.s_bright
@@ -292,16 +275,8 @@ class ControlCenter(GlassPanel):
         self._apply_caps()
 
     # ------------------------------------------------------------ setup
-    def sync_config(self, cfg: dict) -> None:
-        self._theme = cfg.get("theme", "black")
-        self.feeds.sync_config(cfg.get("centre", {}))
-        # `show()` already fired showEvent -> start(). Calling start() again
-        # here, plus an unconditional forced refresh, meant opening the
-        # centre cost three full metric refreshes and two toggle refreshes —
-        # roughly fourteen synchronous subprocess spawns in one event-loop
-        # turn, because `force` cleared the TTL caches each time.
-        if cfg.get("centre", {}).get("enabled", True) and not self._poll.isActive():
-            self.start()
+    def sync_theme(self, theme: str) -> None:
+        self._theme = theme
 
     def _apply_caps(self) -> None:
         c = self.caps
@@ -326,45 +301,31 @@ class ControlCenter(GlassPanel):
 
     def apply_palette(self, pal: dict) -> None:
         self._pal = dict(pal)
-        self.gauge.apply_palette(pal)
-        self.feeds.apply_palette(pal)
         self.rail.apply_palette(pal)
-        self.calendar.apply_palette(pal)
-        # Frameless: the panel paints nothing, so the RSS list, the gauge and
-        # the calendar sit directly on the screen with no container behind
-        # them. This call used to paint a glass shell here.
-        self.set_frameless(True)
 
     # ------------------------------------------------------------ life
     def start(self) -> None:
         if not self._poll.isActive():
             self._poll.start()
-        self.feeds.start()
-        self._refresh_metrics(force=True)
+        self._refresh_levels(force=True)
         self._refresh_toggles()
 
     def stop(self) -> None:
         self._poll.stop()
-        self.feeds.stop()
 
-    def showEvent(self, event):  # noqa: N802
-        super().showEvent(event)
-        self.start()
-
-    def hideEvent(self, event):  # noqa: N802
-        super().hideEvent(event)
-        self.stop()
+    def is_active(self) -> bool:
+        return self._poll.isActive()
 
     # ------------------------------------------------------------ poll
     def tick(self) -> None:
-        self._refresh_metrics()
+        self._refresh_levels()
         # Toggle indicators change at human speed; re-reading NetworkManager
         # and pactl on every tick is what made this panel feel heavy.
         self._toggle_tick += 1
         if self._toggle_tick % TOGGLE_EVERY_N_TICKS == 0:
             self._refresh_toggles()
 
-    def _refresh_metrics(self, force: bool = False) -> None:
+    def _refresh_levels(self, force: bool = False) -> None:
         b = self.backend
         if force:
             probes.run(lambda: (b.audio._cache.clear(),
@@ -373,7 +334,7 @@ class ControlCenter(GlassPanel):
             # One worker hop for both volumes: pactl costs ~50ms a spawn and
             # this runs every 1.5s. It blocks the GUI thread, so it must not.
             vols = probes.run(lambda: (b.audio.volume("source", fresh=force),
-                                       b.audio.volume("sink", fresh=force)),
+                                        b.audio.volume("sink", fresh=force)),
                               timeout=4.0, default=(None, None))
             v, o = vols
             if v is not None and not self.s_mic.is_dragging():
@@ -384,25 +345,6 @@ class ControlCenter(GlassPanel):
             level = probes.run(b.brightness.get, timeout=4.0)
             if level is not None:
                 self.s_bright.set_value(level)
-
-        down, up = b.speed.sample()
-        temp = sensorsmod.get_cpu_temp()
-        ram, load = probes.run(self._host_load, timeout=3.0, default=(0.0, 0.0))
-
-        self.gauge.set_metric("TEMP", temp or 0.0, 100.0, "%.0f°C")
-        self.gauge.set_metric("RAM", ram, 100.0, "%.0f%%")
-        self.gauge.set_metric("LOAD", load, 100.0, "%.0f%%")
-        head = f"{temp:.0f}°C" if temp else "—"
-        self.gauge.set_center(head, f"↓ {sysctl.format_bps(down)}")
-
-    @staticmethod
-    def _host_load() -> tuple[float, float]:
-        try:
-            import psutil
-            return psutil.virtual_memory().percent, psutil.cpu_percent(
-                interval=None)
-        except Exception:
-            return 0.0, 0.0
 
     def _refresh_toggles(self) -> None:
         """Read every toggle's real state in ONE worker hop.
@@ -577,3 +519,137 @@ class ControlCenter(GlassPanel):
             ok = False
         if not ok:
             dot.flash_error()
+
+
+class ControlCenter(GlassPanel):
+    """The full-island panel: feeds, gauge and calendar, full window width.
+
+    Owns polling for its own metrics; idle when not visible. The control
+    rail (sliders + toggles) lives in the expanded card and is owned by
+    `Controls`, so opening the full island never re-parents any widget.
+    """
+
+    def __init__(self, on_config_changed=None, parent=None):
+        super().__init__(parent)
+        self._on_cfg = on_config_changed
+        self._pal = {}
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
+
+        # ---- feeds: continuous scroll, one feed at a time ----
+        self.feeds = FeedCarousel(on_config_changed, self)
+        root.addWidget(self.feeds, 1)
+
+        # ---- gauge ----
+        self.gauge = RingGauge()
+        self.gauge.setFixedWidth(GAUGE_W)
+        root.addWidget(self.gauge)
+
+        # ---- calendar / to-dos, as the last column ----
+        self.calendar = TodoColumn(on_config_changed, self)
+        self.calendar.setFixedWidth(CALENDAR_W)
+        root.addWidget(self.calendar)
+
+        # Shared backend singleton (warmed by Controls at startup) for the
+        # network-speed readout. No extra probing happens here.
+        self.backend = sysctl.Backend.get()
+
+        # ---- polling ----
+        self._poll = QTimer(self)
+        self._poll.timeout.connect(self.tick)
+        self._poll.setInterval(POLL_MS)
+
+    # ------------------------------------------------------------ setup
+    def sync_config(self, cfg: dict) -> None:
+        self.feeds.sync_config(cfg.get("centre", {}))
+        # `show()` already fired showEvent -> start(). Calling start() again
+        # here, plus an unconditional forced refresh, meant opening the
+        # centre cost three full metric refreshes and two toggle refreshes —
+        # roughly fourteen synchronous subprocess spawns in one event-loop
+        # turn, because `force` cleared the TTL caches each time.
+        if cfg.get("centre", {}).get("enabled", True) and not self._poll.isActive():
+            self.start()
+
+    def apply_palette(self, pal: dict) -> None:
+        self._pal = dict(pal)
+        self.gauge.apply_palette(pal)
+        self.feeds.apply_palette(pal)
+        self.calendar.apply_palette(pal)
+        # Opaque: the panel paints a solid shell; inner columns are solid
+        # cards with visible borders so the double-click panel reads as
+        # three tidy columns, not floating text.
+        self.set_frameless(False)
+        pane = pal.get("pane", "#151519")
+        card = pal.get("bg", "#101013")
+        border = pal.get("btn_border", "#34343c")
+        text = pal.get("text", pal.get("ink", "#f2efe8"))
+        sub = pal.get("sub", "#a8a49d")
+        accent = pal.get("accent", "#59d98c")
+        self.setStyleSheet(
+            f"ControlCenter {{ background: {card}; }}"
+            f"ControlCenter QLabel {{ background: {card}; color: {text}; }}"
+        )
+        self.feeds.setStyleSheet(
+            f"FeedCarousel {{ background: {pane}; border: 1px solid {border};"
+            f" border-radius: 12px; }}"
+        )
+        self.calendar.setStyleSheet(
+            f"TodoColumn {{ background: {pane}; border: 1px solid {border};"
+            f" border-radius: 12px; }}"
+            f"TodoColumn QLabel {{ background: {pane}; color: {text}; }}"
+            f"TodoColumn QPushButton {{ background: {pal.get('btn', pane)};"
+            f" border: 1px solid {border}; border-radius: 6px; padding: 4px 8px;"
+            f" color: {text}; font-weight: 600; }}"
+            f"TodoColumn QPushButton:hover {{ border: 1px solid {accent};"
+            f" color: {accent}; }}"
+            f"TodoColumn QLineEdit {{ background: {card};"
+            f" border: 1px solid {border}; border-radius: 6px;"
+            f" padding: 5px 7px; color: {text}; }}"
+            f"TodoColumn QListWidget {{ background: {card};"
+            f" border: 1px solid {border}; border-radius: 8px;"
+            f" color: {text}; }}")
+
+    # ------------------------------------------------------------ life
+    def start(self) -> None:
+        if not self._poll.isActive():
+            self._poll.start()
+        self.feeds.start()
+        self._refresh_metrics()
+
+    def stop(self) -> None:
+        self._poll.stop()
+        self.feeds.stop()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self.start()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        self.stop()
+
+    # ------------------------------------------------------------ poll
+    def tick(self) -> None:
+        self._refresh_metrics()
+
+    def _refresh_metrics(self) -> None:
+        down, up = self.backend.speed.sample()
+        temp = sensorsmod.get_cpu_temp()
+        ram, load = probes.run(self._host_load, timeout=3.0, default=(0.0, 0.0))
+
+        self.gauge.set_metric("TEMP", temp or 0.0, 100.0, "%.0f°C")
+        self.gauge.set_metric("RAM", ram, 100.0, "%.0f%%")
+        self.gauge.set_metric("LOAD", load, 100.0, "%.0f%%")
+        head = f"{temp:.0f}°C" if temp else "—"
+        self.gauge.set_center(head, f"↓ {sysctl.format_bps(down)}")
+
+    @staticmethod
+    def _host_load() -> tuple[float, float]:
+        try:
+            import psutil
+            return psutil.virtual_memory().percent, psutil.cpu_percent(
+                interval=None)
+        except Exception:
+            return 0.0, 0.0

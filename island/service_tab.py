@@ -99,16 +99,20 @@ class Notice(QWidget):
         colour = {
             "error": colorsmod.ERROR.name(),
             "ok": colorsmod.OK.name(),
-        }.get(kind, "palette(mid)")
+        }.get(kind, "#888888")
+        # Opaque notice strip: solid dark fill, solid 1px border.
         self.setStyleSheet(
-            f"Notice {{ background: rgba(255, 255, 255, 0.06);"
+            f"Notice {{ background: #1c1c21;"
             f" border: 1px solid {colour}; border-radius: 8px; }}"
-            f"Notice QLabel {{ color: {colour}; font-size: 11px; }}"
-            f"Notice QPushButton {{ color: {colour}; }}"
+            f"Notice QLabel {{ color: {colour}; font-size: 11px;"
+            f" background: #1c1c21; }}"
+            f"Notice QPushButton {{ color: {colour}; background: #1c1c21; }}"
             if kind != "info" else
-            "Notice { background: rgba(255, 255, 255, 0.06);"
-            " border: 1px solid palette(mid); border-radius: 8px; }"
-            "Notice QLabel { font-size: 11px; }")
+            "Notice { background: #1c1c21;"
+            " border: 1px solid #3a3a42; border-radius: 8px; }"
+            "Notice QLabel { font-size: 11px; color: #e8e8e8;"
+            " background: #1c1c21; }"
+            "Notice QPushButton { background: #1c1c21; }")
         self._text.setAccessibleName(text)
         self.show()
         self._timer.start(NOTICE_ERROR_MS if kind == "error" else NOTICE_MS)

@@ -17,11 +17,12 @@ from . import colors as colorsmod
 from . import icons as iconsmod
 from . import sensors as sensorsmod
 from . import themes as themesmod
-from .center import ControlCenter, Rail
+from .center import ControlCenter, Controls
 from .face import FaceView
 from .geom import (COLLAPSED_CORNER, COLLAPSED_ISLAND_H, COLLAPSED_ISLAND_W,
                    CENTRE_GAP, CENTRE_H, CENTRE_MIN_H, CENTRE_MIN_W, CENTRE_W,
-                   EXPANDED_H, EXPANDED_MAX_H, EXPANDED_W, ISLAND_TOP_INSET)
+                   EXPANDED_H, EXPANDED_MAX_H, EXPANDED_W, CARD_W,
+                   ISLAND_TOP_INSET)
 from .glass import GlassPanel
 from .service_tab import ServiceTab
 from .tabs import BotTab, CalendarTab, SystemNotesTab, AppearanceTab
@@ -56,6 +57,10 @@ class IslandWindow(QWidget):
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
+        # Only the top-level window keeps a translucent background, solely so
+        # the opaque rounded panels can have anti-aliased outer corners.
+        # Every child panel (collapsed / card / content / centre) paints a
+        # fully opaque fill — there is no glass or translucency in the UI.
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         # NOTE: intentionally NOT using WA_ShowWithoutActivating so expanded
         # inputs (calendar add, notes) can receive focus.
@@ -81,11 +86,11 @@ class IslandWindow(QWidget):
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(0, 0, 0, 0)
 
-        # collapsed island capsule (glass shell, painted by GlassPanel)
+        # collapsed island capsule (opaque shell, painted by GlassPanel)
         self.collapsed = GlassPanel(self)
         self.collapsed.setObjectName("collapsed")
         ch = QHBoxLayout(self.collapsed)
-        ch.setContentsMargins(6, 3, 12, 3)
+        ch.setContentsMargins(10, 5, 14, 5)
         ch.setSpacing(8)
         # One face widget, re-parented between the collapsed pill and the
         # expanded card's header. They are never on screen at the same
@@ -112,19 +117,19 @@ class IslandWindow(QWidget):
         ch.addStretch(1)
         self.root.addWidget(self.collapsed)
 
-        # expanded card (frameless shell). Top: a pill row of face, time and
+        # expanded card (opaque shell). Top: a pill row of face, time and
         # status dot. Then the tab strip. Then the tab content.
         self.card = GlassPanel(self)
         self.card.setObjectName("card")
         cv = QVBoxLayout(self.card)
-        cv.setContentsMargins(4, 4, 4, 4)
-        cv.setSpacing(2)
+        cv.setContentsMargins(10, 10, 10, 10)
+        cv.setSpacing(8)
 
         # The pill: same three elements as the collapsed capsule, at the
         # card's scale. It used to be a 132px avatar beside a stack of
         # time/date/temperature, which is not what the pill reads as.
         head = QHBoxLayout()
-        head.setContentsMargins(8, 6, 8, 6)
+        head.setContentsMargins(4, 4, 4, 4)
         head.setSpacing(10)
         self._pill_slot = QVBoxLayout()
         self._pill_slot.setContentsMargins(0, 0, 0, 0)
@@ -141,19 +146,19 @@ class IslandWindow(QWidget):
         head.addWidget(self.big_temp)
         head.addStretch(1)
         self.collapse_btn = QPushButton("–")
-        self.collapse_btn.setFixedSize(28, 28)
+        self.collapse_btn.setFixedSize(30, 30)
         self.collapse_btn.setToolTip("Collapse (click the island to expand)")
         self.collapse_btn.setAccessibleName("Collapse back to the island")
         self.collapse_btn.clicked.connect(self.collapse)
         head.addWidget(self.collapse_btn, 0, Qt.AlignVCenter)
-        cv.addLayout(head)
 
         self.full_btn = QPushButton("⤢")
-        self.full_btn.setFixedSize(28, 28)
+        self.full_btn.setFixedSize(30, 30)
         self.full_btn.setToolTip("Open the full island (double-click anywhere)")
         self.full_btn.setAccessibleName("Open the full island")
         self.full_btn.clicked.connect(self.open_centre)
         head.addWidget(self.full_btn, 0, Qt.AlignVCenter)
+        cv.addLayout(head)
 
         self.tabs = QTabWidget()
         # A second, larger face for the Bot tab. The card header and the
@@ -178,10 +183,10 @@ class IslandWindow(QWidget):
         self.appear_tab = AppearanceTab(self.set_theme, self.set_face_bg)
         self.appear_tab.set_theme(self.cfg.get("theme", "black"))
         self.appear_tab.set_bg(self.cfg.get("face_bg", "none"))
-        self.tabs.addTab(self.bot_tab, "Bot / Time")
+        self.tabs.addTab(self.bot_tab, "Bot")
         self.tabs.addTab(self.cal_tab, "Calendar")
-        self.tabs.addTab(self.sys_tab, "System / Notes")
-        self.tabs.addTab(self.appear_tab, "Appearance")
+        self.tabs.addTab(self.sys_tab, "System")
+        self.tabs.addTab(self.appear_tab, "Theme")
         self.svc_tab = ServiceTab()
         self.tabs.addTab(self.svc_tab, "Service")
 
@@ -193,13 +198,26 @@ class IslandWindow(QWidget):
         self.tabs.installEventFilter(self)
         self.collapse_btn.installEventFilter(self)
         self.full_btn.installEventFilter(self)
-        # bottom container: the menus live in their own glass panel
+        # bottom row: the control rail on the left, the tab content on
+        # the right. The rail used to float beside the card as its own
+        # panel; it now lives inside the card so nothing floats.
+        self.controls = Controls(
+            on_config_changed=self._centre_config_changed)
+        self.controls.themeToggleRequested.connect(self.set_theme)
+        self.rail = self.controls.rail
+        self.rail.setVisible(False)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(CENTRE_GAP)
+        body.addWidget(self.rail)
+        # bottom container: the menus live in their own opaque panel
         self.content = GlassPanel(self.card)
         self.content.setObjectName("content")
         cv_content = QVBoxLayout(self.content)
-        cv_content.setContentsMargins(10, 10, 10, 10)
+        cv_content.setContentsMargins(8, 8, 8, 8)
         cv_content.addWidget(self.tabs)
-        cv.addWidget(self.content, 1)
+        body.addWidget(self.content, 1)
+        cv.addLayout(body, 1)
 
         self.hint = QLabel("Click: island · Double-click: control centre · "
                    "Right-click: more · Drag to move")
@@ -208,31 +226,14 @@ class IslandWindow(QWidget):
 
         self.root.addWidget(self.card)
 
-        # Control centre — a SECOND, deliberately separate glass panel below
-        # the card, split from it by CENTRE_GAP. Opened by double-click.
+        # Control centre — the full-island panel (feeds, gauge, calendar),
+        # full window width. Opened by double-click. Fully opaque like
+        # everything else: each column sits on a solid fill with a
+        # visible 1px border.
         self.center = ControlCenter(
             on_config_changed=self._centre_config_changed)
-        self.center.themeToggleRequested.connect(self.set_theme)
         self.center.setObjectName("center")
-
-        # One row: the rail on the left, and a stacked area beside it that
-        # holds either the expanded card or the full island panel. The rail
-        # used to be re-parented between two layouts depending on state,
-        # which is why only one of the two could ever be on screen.
-        self.main_row = QHBoxLayout()
-        self.main_row.setContentsMargins(0, 0, 0, 0)
-        self.main_row.setSpacing(CENTRE_GAP)
-        self.rail = self.center.rail
-        self.rail.setVisible(False)
-        self.main_row.addWidget(self.rail)
-
-        self.stack_area = QVBoxLayout()
-        self.stack_area.setContentsMargins(0, 0, 0, 0)
-        self.stack_area.setSpacing(CENTRE_GAP)
-        self.stack_area.addWidget(self.card)
-        self.stack_area.addWidget(self.center)
-        self.main_row.addLayout(self.stack_area, 1)
-        self.root.addLayout(self.main_row)
+        self.root.addWidget(self.center)
 
         self.center.setVisible(False)
         self._centre_size = None
@@ -326,7 +327,7 @@ class IslandWindow(QWidget):
         g = self._screen_geo()
         m = int(self.cfg.get("corner_margin", 0) or 0)
         c = self.cfg.get("corner", "top-right")
-        w = COLLAPSED_CORNER if not self.expanded else EXPANDED_W
+        w = COLLAPSED_CORNER if not self.expanded else CARD_W
         h = COLLAPSED_CORNER if not self.expanded else EXPANDED_H
         if c == "top-left":
             x, y = g.x() + m, g.y() + m
@@ -339,18 +340,14 @@ class IslandWindow(QWidget):
         self.setGeometry(x, y, w, h)
 
     def _rail_visible_now(self) -> bool:
-        """The rail is shown in both wide states — but not in corner mode,
-        where it has nothing to sit beside."""
-        if not self.expanded:
+        """The rail lives inside the card: it shows exactly when the card
+        does — except in corner mode, where the card goes solo."""
+        if not self.expanded or self.centre_open:
             return False
-        return bool(self.centre_open) or self.cfg.get("mode") != "corner"
+        return self.cfg.get("mode") != "corner"
 
     def _expanded_size(self) -> tuple[int, int]:
-        """Window size for the expanded card, including the rail.
-
-        The window contains rail + gap + card, so sizing the *window* to
-        EXPANDED_W (as the old two-row layout allowed) squeezed the rail out
-        and left a 368px window with a 172px rail inside it.
+        """Window size for the expanded card: one fixed width everywhere.
 
         Height comes from the tallest tab rather than the card's own
         sizeHint, which QTabWidget inflates to a value that does not match
@@ -363,16 +360,12 @@ class IslandWindow(QWidget):
                 tallest = max(tallest, page.sizeHint().height())
         # Header, tab strip and hint label live above/below the pages.
         card_h = min(tallest + 96, EXPANDED_MAX_H)
-        w = EXPANDED_W
-        if self._rail_visible_now():
-            w += self.rail.width() + CENTRE_GAP
-        return w, card_h
+        return CARD_W, card_h
 
     def _apply_mode_visual(self):
         is_corner = self.cfg.get("mode") == "corner"
         # `full` means the wide panel is showing; `card` means the expanded
-        # card is. They are mutually exclusive: both live in the same
-        # stacked area beside the rail.
+        # card is. They are mutually exclusive.
         full = bool(self.expanded and self.centre_open)
         if not self.expanded and is_corner:
             self.collapsed.setVisible(False)
@@ -391,17 +384,17 @@ class IslandWindow(QWidget):
                 self.setFixedSize(w, h)
             elif self.expanded:
                 ew, eh = self._expanded_size()
-                self.card.setFixedWidth(EXPANDED_W)
+                self.card.setFixedWidth(ew)
                 self.setFixedSize(ew, eh)
                 if is_corner:
                     self._move_to_corner()
             else:
-                self.card.setFixedWidth(EXPANDED_W)
+                self.card.setFixedWidth(CARD_W)
                 self.setFixedSize(COLLAPSED_ISLAND_W, COLLAPSED_ISLAND_H)
-        self._update_rail(full, is_corner)
+        self._update_rail_visibility(full, is_corner)
 
-    def _update_rail(self, full: bool = None, is_corner: bool = None) -> None:
-        """The rail exists in both wide states, never in the collapsed one.
+    def _update_rail_visibility(self, full: bool = None, is_corner: bool = None) -> None:
+        """The rail shows exactly when the card does (island mode only).
 
         Called directly from every transition as well as from the settle
         callback: relying on the callback alone meant the rail stayed hidden
@@ -411,8 +404,8 @@ class IslandWindow(QWidget):
             full = bool(self.expanded and self.centre_open)
         if is_corner is None:
             is_corner = self.cfg.get("mode") == "corner"
-        visible = bool(self.expanded and (full or not is_corner))
-        if self.rail.isVisible() != visible or self.rail.isHidden() == visible:
+        visible = bool(self.expanded and not full and not is_corner)
+        if self.rail.isVisible() != visible:
             self.rail.setVisible(visible)
         # Enforce animation end-state: layout fights during the flight can
         # leave a wrong size; the recorded target always wins.
@@ -482,7 +475,8 @@ class IslandWindow(QWidget):
             return
         self.expanded = True
         self._move_pill_face(True)
-        self._update_rail()
+        self._update_rail_visibility()
+        self.controls.start()
         self.set_emotion("01")  # waking blip, engine auto-advances to idle
         QTimer.singleShot(WAKE_SETTLE_MS, lambda: self.set_emotion("10") if self.expanded else None)
         w, h = self._expanded_size()
@@ -524,7 +518,8 @@ class IslandWindow(QWidget):
             return
         self.expanded = False
         self._move_pill_face(False)
-        self._update_rail()
+        self._update_rail_visibility()
+        self.controls.stop()
         self.set_emotion("41")
         if self.cfg.get("mode") == "corner":
             self._animate_to(COLLAPSED_CORNER, COLLAPSED_CORNER, anchor_corner=True)
@@ -538,7 +533,8 @@ class IslandWindow(QWidget):
 
     # ---------- control centre (double click) ----------
     def _centre_geometry(self) -> tuple[int, int]:
-        """Window size for the full island: rail + the wide panel, one row.
+        """Window size for the full island: feeds, gauge and calendar in
+        one row, full window width.
 
         The panel has a FIXED height so the layout can never squeeze its
         contents; the feed list scrolls instead. On a short screen the
@@ -548,9 +544,6 @@ class IslandWindow(QWidget):
         avail_h = max(200, g.height() - 24)
         panel_h = min(CENTRE_H, max(CENTRE_MIN_H, avail_h))
         w = min(CENTRE_W, max(CENTRE_MIN_W, g.width() - 24))
-        # The row also has to fit the rail beside the panel.
-        need = Rail.WIDTH + CENTRE_GAP + EXPANDED_W + 24
-        w = max(w, min(need, g.width() - 16))
         if self._centre_size != (w, panel_h):
             self._centre_size = (w, panel_h)
             self.center.setFixedSize(w, panel_h)
@@ -570,7 +563,8 @@ class IslandWindow(QWidget):
         self.centre_open = True
         w, h = self._centre_geometry()
         self.center.show()
-        self._update_rail()
+        self._update_rail_visibility()
+        self.controls.stop()
         self.center.sync_config(self.cfg)
         x, y = self._centre_origin(w, h)
         self._animate_to_rect(QRect(x, y, w, h), hide_card=False)
@@ -581,9 +575,10 @@ class IslandWindow(QWidget):
             return
         self.centre_open = False
         self.center.hide()
-        self._update_rail()
+        self._update_rail_visibility()
+        self.controls.start()
         w, h = self._expanded_size()
-        self.card.setFixedWidth(EXPANDED_W)
+        self.card.setFixedWidth(CARD_W)
         self._animate_to(w, h,
                          anchor_corner=(self.cfg.get("mode") == "corner"))
 
@@ -863,7 +858,8 @@ class IslandWindow(QWidget):
         except Exception:
             pass
         try:
-            self.center._theme = name
+            self.controls.sync_theme(name)
+            self.controls.apply_palette(self._centre_palette())
             self.center.apply_palette(self._centre_palette())
         except Exception:
             pass
@@ -878,7 +874,9 @@ class IslandWindow(QWidget):
             "muted": hexc(t.get("muted", "#6f6c68")),
             "text": hexc(t.get("text", "#f2efe8")),
             "accent": hexc(t.get("accent", "#59d98c")),
-            "track": hexc(t.get("tab", "#17171b")),
+            # The slider/ring track follows the border colour, never a fill:
+            # fills can equal the pane (white on white) and vanish.
+            "track": hexc(t.get("btn_border", "#2c2c33")),
             "bg": hexc(t.get("card_bg", "#0d0d10")),
             "pane": hexc(t.get("pane", "#101013")),
             "btn": hexc(t.get("btn", "#1d1d22")),
@@ -887,7 +885,7 @@ class IslandWindow(QWidget):
             # system, so it never matched any theme.
             "off": hexc(t.get("muted", "#6f6c68")),
             "warn": hexc(t.get("accent", "#59d98c")),
-            "error": colorsmod.ERROR.hex(),
+            "error": colorsmod.ERROR.name(),
         }
 
     # ---------- menu ----------
